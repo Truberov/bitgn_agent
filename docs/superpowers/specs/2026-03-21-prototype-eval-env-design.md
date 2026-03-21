@@ -45,7 +45,9 @@ from abc import ABC, abstractmethod
 class BaseAgent(ABC):
     @abstractmethod
     async def build(self) -> None:
-        """Initialize the agent (create LLM, tools, etc.)"""
+        """Initialize the agent (create LLM, tools, etc.).
+        Called once per task — each task gets a fresh agent instance.
+        Model, prompt, tools are defined by the prototype itself."""
         ...
 
     @abstractmethod
@@ -53,6 +55,8 @@ class BaseAgent(ABC):
         """Run the agent on a single task. Returns answer or None."""
         ...
 ```
+
+**Instance lifecycle**: One agent instance per task. `build()` creates the LLM client, tools, and LangChain agent graph. `run()` connects to the harness and executes. This avoids shared mutable state (VMHolder becomes instance state on `self`). LLM client objects are lightweight HTTP wrappers — no cost to creating per-task.
 
 ### Prototype Loader (`prototypes/__init__.py`)
 
@@ -62,17 +66,22 @@ from .base import BaseAgent
 
 def load_prototype(name: str) -> type[BaseAgent]:
     module = importlib.import_module(f"prototypes.{name}")
-    return module.Agent
+    agent_cls = module.Agent
+    assert issubclass(agent_cls, BaseAgent), f"{name}.Agent must subclass BaseAgent"
+    return agent_cls
 ```
 
 ### Baseline Prototype (`prototypes/baseline/agent.py`)
 
 Migrated from current `agent.py`:
 - Wrapped in `class Agent(BaseAgent)`
-- `build_agent()` → `async build()`
-- `run_agent()` → `async run(harness_url, instruction)`
+- Model hardcoded inside the prototype (e.g. `MODEL_ID = "gpt-4.1-2025-04-14"`)
+- `build_agent()` → `async build()` — creates ChatOpenAI, creates tools bound to `self`
+- `run_agent()` → `async run(harness_url, instruction)` — creates `MiniRuntimeClient`, invokes agent
 - Uses `MiniRuntimeClient` (async) instead of `MiniRuntimeClientSync`
 - Uses `agent.ainvoke()` instead of `agent.invoke()`
+- Tool functions become `async def` (LangChain `@tool` supports async)
+- VMHolder becomes instance state on `self` instead of a separate class
 
 ### YAML Config (`configs/baseline_sandbox.yaml`)
 
@@ -103,17 +112,29 @@ class EvalResult:
 
     @property
     def avg_score(self) -> float:
+        if not self.results:
+            return 0.0
         return sum(r.score for r in self.results) / len(self.results)
 
 async def run_eval(config: dict) -> EvalResult:
     """
     1. load_prototype(config["prototype"]) → AgentClass
-    2. agent = AgentClass(); await agent.build()
-    3. Connect to BitGN HarnessService (async client)
-    4. Fetch benchmark tasks
+    2. Connect to BitGN HarnessService (async: HarnessServiceClient)
+    3. Fetch benchmark tasks via get_benchmark()
+    4. Create Langfuse client, generate session_id for this eval run
     5. sem = asyncio.Semaphore(config["concurrency"])
-    6. Run tasks in parallel via asyncio.gather with semaphore
-    7. Langfuse tracing per task
+    6. For each task, create coroutine run_task(task):
+       a. async with sem
+       b. agent = AgentClass(); await agent.build()
+       c. Start playground: await harness.start_playground(...)
+       d. Create Langfuse CallbackHandler with session_id
+       e. result = await agent.run(harness_url, instruction)
+       f. End trial: await harness.end_trial(EndTrialRequest(trial_id=...))
+       g. Extract score and score_detail from response
+       h. Report score to Langfuse via langfuse.create_score(...)
+       i. Return TaskResult(task_id, score, details)
+       j. On exception: return TaskResult(task_id, score=0.0, details=str(error))
+    7. results = await asyncio.gather(*coros)
     8. Return EvalResult
     """
 ```
@@ -124,10 +145,15 @@ async def run_eval(config: dict) -> EvalResult:
 import asyncio
 import sys
 import yaml
+from dotenv import load_dotenv
 
 from eval.runner import run_eval
 
 async def main():
+    load_dotenv()
+    if len(sys.argv) < 2:
+        print("Usage: python main.py <config.yaml>")
+        sys.exit(1)
     config_path = sys.argv[1]
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -147,14 +173,29 @@ if __name__ == "__main__":
 | BitGN VM client | `MiniRuntimeClientSync` | `MiniRuntimeClient` |
 | BitGN Harness | `HarnessServiceClientSync` | `HarnessServiceClient` |
 | LangChain agent | `agent.invoke()` | `agent.ainvoke()` |
-| Tool functions | sync `_call_vm()` | `async _call_vm()` |
+| Tool functions | sync `def` with `@tool` | `async def` with `@tool` |
+| Tool helper | sync `_call_vm()` | `async _call_vm()` |
 | Langfuse | `CallbackHandler` | `CallbackHandler` (works with async) |
 
 ## Concurrency Model
 
 - `asyncio.Semaphore(config["concurrency"])` limits parallel task execution
 - Each task gets its own agent instance (via `AgentClass()` + `build()`) to avoid shared state
-- Tasks run via `asyncio.gather(*[run_task_with_sem(task) for task in tasks])`
+- LLM client objects are lightweight HTTP wrappers — no cost to per-task creation
+- Tasks run via `asyncio.gather(*[run_task(task) for task in tasks])`
+- Each task coroutine catches its own exceptions and returns `TaskResult(score=0.0)` on failure
+
+## Langfuse Integration
+
+- One `session_id` per eval run (groups all task traces together)
+- Each task creates a `CallbackHandler(session_id=session_id, tags=["bitgn", "agent"])`
+- After `end_trial`, score is reported via `langfuse.create_score(trace_id, "task_score", score, data_type="NUMERIC")`
+
+## BitGN API Usage
+
+- Uses `start_playground` (preserves current behavior)
+- `get_benchmark(benchmark_name)` to fetch tasks
+- `end_trial(EndTrialRequest(trial_id=...))` to get score after agent completes
 
 ## New Prototype Workflow
 
