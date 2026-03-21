@@ -50,8 +50,9 @@ CLI_BLUE = "\x1b[34m"
 
 class Agent(BaseAgent):
     def __init__(self) -> None:
-        self._agent = None
         self._vm: MiniRuntimeClient | None = None
+        llm = ChatOpenAI(model=MODEL_ID, base_url="https://openrouter.ai/api/v1")
+        self._agent = create_agent(llm, tools=self._create_tools(), system_prompt=SYSTEM_PROMPT)
 
     async def _call_vm(self, fn, *args) -> str:
         """Call an async VM method and return JSON string result or error text."""
@@ -130,12 +131,6 @@ class Agent(BaseAgent):
 
         return [tree, search, list_dir, read_file, write_file, delete_file, report_completion]
 
-    async def build(self) -> None:
-        """Build LLM and agent graph."""
-        llm = ChatOpenAI(model=MODEL_ID, base_url="https://openrouter.ai/api/v1")
-        tools = self._create_tools()
-        self._agent = create_agent(llm, tools=tools, system_prompt=SYSTEM_PROMPT)
-
     async def run(
         self,
         harness_url: str,
@@ -143,7 +138,6 @@ class Agent(BaseAgent):
         config: dict | None = None,
     ) -> str | None:
         """Run the agent on a single task."""
-        assert self._agent is not None, "Call build() before run()"
         self._vm = MiniRuntimeClient(harness_url)
 
         result = await self._agent.ainvoke(

@@ -101,7 +101,6 @@ async def run_eval(config: dict) -> EvalResult:
 
             try:
                 agent = AgentClass()
-                await agent.build()
                 await agent.run(
                     trial.harness_url,
                     trial.instruction,
