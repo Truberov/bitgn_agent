@@ -377,8 +377,13 @@ async def run_eval(config: dict) -> EvalResult:
     if task_filter:
         tasks = [t for t in tasks if t.task_id in task_filter]
 
-    langfuse = get_client()
-    session_id = langfuse.create_trace_id()
+    try:
+        langfuse = get_client()
+        session_id = langfuse.create_trace_id()
+    except Exception:
+        langfuse = None
+        session_id = None
+
     sem = asyncio.Semaphore(concurrency)
 
     async def run_task(t) -> TaskResult:
@@ -394,15 +399,17 @@ async def run_eval(config: dict) -> EvalResult:
             )
             print("Task:", trial.instruction)
 
-            langfuse_handler = CallbackHandler()
-            invoke_config = {
-                "callbacks": [langfuse_handler],
-                "metadata": {
-                    "langfuse_session_id": session_id,
-                    "langfuse_tags": ["bitgn", "agent"],
-                },
-                "run_name": f"task-{t.task_id}",
-            }
+            langfuse_handler = CallbackHandler() if langfuse else None
+            invoke_config = {}
+            if langfuse_handler:
+                invoke_config = {
+                    "callbacks": [langfuse_handler],
+                    "metadata": {
+                        "langfuse_session_id": session_id,
+                        "langfuse_tags": ["bitgn", "agent"],
+                    },
+                    "run_name": f"task-{t.task_id}",
+                }
 
             try:
                 agent = AgentClass()
@@ -419,7 +426,7 @@ async def run_eval(config: dict) -> EvalResult:
                 EndTrialRequest(trial_id=trial.trial_id)
             )
 
-            if langfuse_handler.last_trace_id:
+            if langfuse_handler and langfuse_handler.last_trace_id:
                 langfuse.create_score(
                     trace_id=langfuse_handler.last_trace_id,
                     name="task_score",
@@ -454,7 +461,8 @@ async def run_eval(config: dict) -> EvalResult:
         else:
             final_results.append(r)
 
-    langfuse.flush()
+    if langfuse:
+        langfuse.flush()
 
     return EvalResult(
         prototype=prototype_name,
@@ -573,15 +581,17 @@ git rm agent.py
 Run: `python -c "from prototypes import load_prototype; from eval.runner import run_eval; print('OK')"`
 Expected: `OK`
 
-- [ ] **Step 3: Smoke test with YAML config**
+- [ ] **Step 3: Smoke test with YAML config (Langfuse disabled)**
 
-Run: `python main.py configs/baseline_sandbox.yaml`
+Temporarily disable Langfuse by unsetting its env vars so the smoke test doesn't depend on Langfuse credentials:
 
-This will connect to BitGN, run benchmark tasks concurrently, and print scores. Verify:
+Run: `LANGFUSE_SECRET_KEY= LANGFUSE_PUBLIC_KEY= python main.py configs/baseline_sandbox.yaml`
+
+Verify:
 - Agent loads as `prototypes.baseline.agent.Agent`
 - Tasks run with async concurrency
-- Langfuse traces are recorded
 - Scores are printed
+- No Langfuse errors crash the run (graceful degradation)
 
 If BitGN is not available, at minimum verify the script starts, loads the config, loads the prototype, and fails at the network call (not at import/config parsing).
 
