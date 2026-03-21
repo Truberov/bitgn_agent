@@ -10,17 +10,16 @@
 main.py                  — CLI entry point: `python main.py <config.yaml>`
 configs/                 — YAML eval configs (prototype, benchmark, concurrency, task_ids)
 eval/runner.py           — Async eval runner: loads prototype, fetches benchmark, runs tasks concurrently, reports scores to Langfuse
-prototypes/base.py       — BaseAgent ABC (build + run)
+prototypes/base.py       — BaseAgent ABC (run)
 prototypes/__init__.py   — Dynamic prototype loader (load_prototype)
 prototypes/baseline/     — Reference agent implementation (LangChain + OpenAI via OpenRouter)
 ```
 
 ### Agent Lifecycle
 
-1. `AgentClass()` — fresh instance per task
-2. `agent.build()` — init LLM, tools, graph
-3. `agent.run(harness_url, instruction, config)` — execute task against VM
-4. Harness scores the result via `end_trial`
+1. `AgentClass()` — fresh instance per task (LLM, tools, graph init in `__init__`)
+2. `agent.run(harness_url, instruction, config)` — execute task against VM
+3. Harness scores the result via `end_trial`
 
 ### Key Dependencies
 
@@ -44,7 +43,7 @@ uv run ruff format .                                   # Format
 ### Adding a New Prototype
 
 1. Create `prototypes/<name>/agent.py`
-2. Implement `Agent(BaseAgent)` with `build()` and `run()`
+2. Implement `Agent(BaseAgent)` with `__init__()` and `run()`
 3. Create a config YAML referencing the prototype name
 4. Run with `python main.py configs/<your_config>.yaml`
 

@@ -3,13 +3,6 @@ from abc import ABC, abstractmethod
 
 class BaseAgent(ABC):
     @abstractmethod
-    async def build(self) -> None:
-        """Initialize the agent (create LLM, tools, etc.).
-        Called once per task — each task gets a fresh agent instance.
-        Model, prompt, tools are defined by the prototype itself."""
-        ...
-
-    @abstractmethod
     async def run(
         self,
         harness_url: str,
