@@ -1,7 +1,8 @@
 import os
 import textwrap
 
-from langfuse import get_client, propagate_attributes
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
 
 from bitgn.harness_connect import HarnessServiceClientSync
 from bitgn.harness_pb2 import (
@@ -13,7 +14,7 @@ from bitgn.harness_pb2 import (
 )
 from connectrpc.errors import ConnectError
 
-from agent import run_agent
+from agent import build_agent, run_agent
 
 BITGN_URL = os.getenv("BENCHMARK_HOST") or "https://api.bitgn.com"
 
@@ -25,9 +26,12 @@ CLI_CLR = "\x1b[0m"
 
 
 def main() -> None:
-
     # optional task ids could be included as tasks to run, e.g. `python main.py task1 task2`
     task_filter = os.sys.argv[1:]
+
+    agent, vm_holder = build_agent(MODEL_ID)
+    langfuse = get_client()
+    session_id = langfuse.create_trace_id()
 
     scores = []
     try:
@@ -54,17 +58,31 @@ def main() -> None:
             print("Task:", trial.instruction)
 
             try:
-                with propagate_attributes(
-                    trace_name=f"task-{t.task_id}",
-                    session_id=trial.trial_id,
-                    metadata={"benchmark": "bitgn/sandbox", "model": MODEL_ID},
-                    tags=["bitgn", "agent"],
-                ):
-                    run_agent(MODEL_ID, trial.harness_url, trial.instruction)
+                langfuse_handler = CallbackHandler()
+                run_agent(
+                    agent,
+                    vm_holder,
+                    trial.harness_url,
+                    trial.instruction,
+                    langfuse_handler,
+                    langfuse_metadata={
+                        "langfuse_session_id": session_id,
+                        "langfuse_tags": ["bitgn", "agent"],
+                    },
+                    run_name=f"task-{t.task_id}",
+                )
             except Exception as e:
                 print(e)
 
             result = client.end_trial(EndTrialRequest(trial_id=trial.trial_id))
+
+            if langfuse_handler.last_trace_id:
+                langfuse.create_score(
+                    trace_id=langfuse_handler.last_trace_id,
+                    name="task_score",
+                    value=result.score,
+                    data_type="NUMERIC",
+                )
 
             if result.score >= 0:
                 scores.append((t.task_id, result.score))
@@ -94,4 +112,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from dotenv import load_dotenv
+
+    load_dotenv()
     main()

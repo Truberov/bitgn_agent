@@ -1,12 +1,10 @@
 import json
-import time
-from typing import Annotated, List, Literal, Union
+from typing import Optional
 
-from annotated_types import Ge, Le, MaxLen, MinLen
 from google.protobuf.json_format import MessageToDict
-from langfuse.openai import OpenAI
-from langfuse import observe
-from pydantic import BaseModel, Field
+from langchain.agents import create_agent
+from langchain.tools import tool
+from langchain_openai import ChatOpenAI
 
 from bitgn.vm.mini_connect import MiniRuntimeClientSync
 from bitgn.vm.mini_pb2 import (
@@ -20,77 +18,7 @@ from bitgn.vm.mini_pb2 import (
 )
 from connectrpc.errors import ConnectError
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key="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",
-)
-
-
-class ReportTaskCompletion(BaseModel):
-    tool: Literal["report_completion"]
-    completed_steps_laconic: List[str]
-    answer: str
-    grounding_refs: List[str] = Field(default_factory=list)
-
-    code: Literal["completed", "failed"]
-
-
-class Req_Tree(BaseModel):
-    tool: Literal["tree"]
-    path: str = Field(..., description="folder path")
-
-
-class Req_Search(BaseModel):
-    tool: Literal["search"]
-    pattern: str
-    count: Annotated[int, Ge(1), Le(10)] = 5
-    path: str = "/"
-
-
-class Req_List(BaseModel):
-    tool: Literal["list"]
-    path: str
-
-
-class Req_Read(BaseModel):
-    tool: Literal["read"]
-    path: str
-
-
-class Req_Write(BaseModel):
-    tool: Literal["write"]
-    path: str
-    content: str
-
-
-class Req_Delete(BaseModel):
-    tool: Literal["delete"]
-    path: str
-
-
-class NextStep(BaseModel):
-    current_state: str
-    # we'll use only the first step, discarding all the rest.
-    plan_remaining_steps_brief: Annotated[List[str], MinLen(1), MaxLen(5)] = Field(
-        ...,
-        description="explain your thoughts on how to accomplish - what steps to execute",
-    )
-    # now let's continue the cascade and check with LLM if the task is done
-    task_completed: bool
-    # AICODE-NOTE: Keep this union aligned with the MiniRuntime protobuf surface so
-    # structured tool calling stays exhaustive as demo VM request types evolve.
-    function: Union[
-        ReportTaskCompletion,
-        Req_Tree,
-        Req_Search,
-        Req_List,
-        Req_Read,
-        Req_Write,
-        Req_Delete,
-    ] = Field(..., description="execute first remaining step")
-
-
-system_prompt = """
+SYSTEM_PROMPT = """
 You are a personal business assistant, helpful and precise.
 
 - always start by discovering available information by running root outline.
@@ -105,101 +33,131 @@ CLI_CLR = "\x1b[0m"
 CLI_BLUE = "\x1b[34m"
 
 
-@observe(name="dispatch-tool")
-def dispatch(vm: MiniRuntimeClientSync, cmd: BaseModel):
-    if isinstance(cmd, Req_Tree):
-        return vm.outline(OutlineRequest(path=cmd.path))
-    if isinstance(cmd, Req_Search):
-        return vm.search(
-            SearchRequest(path=cmd.path, pattern=cmd.pattern, count=cmd.count)
+class VMHolder:
+    """Mutable container so tools can reference the current VM without rebuilding the agent."""
+
+    def __init__(self):
+        self.vm: MiniRuntimeClientSync | None = None
+
+    def set(self, harness_url: str):
+        self.vm = MiniRuntimeClientSync(harness_url)
+
+    def get(self) -> MiniRuntimeClientSync:
+        assert self.vm is not None, "VM not initialized — call set() first"
+        return self.vm
+
+
+def _call_vm(fn, *args):
+    """Call a VM method and return JSON string result or error text."""
+    try:
+        result = fn(*args)
+        mapped = MessageToDict(result)
+        txt = json.dumps(mapped, indent=2)
+        print(f"{CLI_GREEN}OUT{CLI_CLR}: {txt}")
+        return txt
+    except ConnectError as e:
+        print(f"{CLI_RED}ERR {e.code}: {e.message}{CLI_CLR}")
+        return f"Error: {e.message}"
+
+
+def _create_tools(holder: VMHolder):
+    """Create LangChain tools bound to a VMHolder (re-pointable across tasks)."""
+
+    @tool
+    def tree(path: str) -> str:
+        """Get folder structure / outline at the given path."""
+        return _call_vm(holder.get().outline, OutlineRequest(path=path))
+
+    @tool
+    def search(pattern: str, path: str = "/", count: int = 5) -> str:
+        """Search for files matching a pattern. Returns up to `count` results."""
+        return _call_vm(
+            holder.get().search, SearchRequest(path=path, pattern=pattern, count=count)
         )
-    if isinstance(cmd, Req_List):
-        return vm.list(ListRequest(path=cmd.path))
-    if isinstance(cmd, Req_Read):
-        return vm.read(ReadRequest(path=cmd.path))
-    if isinstance(cmd, Req_Write):
-        return vm.write(WriteRequest(path=cmd.path, content=cmd.content))
-    if isinstance(cmd, Req_Delete):
-        return vm.delete(DeleteRequest(path=cmd.path))
-    if isinstance(cmd, ReportTaskCompletion):
-        return vm.answer(AnswerRequest(answer=cmd.answer, refs=cmd.grounding_refs))
 
-    raise ValueError(f"Unknown command: {cmd}")
+    @tool
+    def list_dir(path: str) -> str:
+        """List contents of a directory."""
+        return _call_vm(holder.get().list, ListRequest(path=path))
 
+    @tool
+    def read_file(path: str) -> str:
+        """Read the contents of a file."""
+        return _call_vm(holder.get().read, ReadRequest(path=path))
 
-@observe(name="run-agent")
-def run_agent(model: str, harness_url: str, task_text: str):
-    vm = MiniRuntimeClientSync(harness_url)
+    @tool
+    def write_file(path: str, content: str) -> str:
+        """Write content to a file."""
+        return _call_vm(holder.get().write, WriteRequest(path=path, content=content))
 
-    # log will contain conversation context for the agent within task
-    log = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": task_text},
+    @tool
+    def delete_file(path: str) -> str:
+        """Delete a file."""
+        return _call_vm(holder.get().delete, DeleteRequest(path=path))
+
+    @tool
+    def report_completion(
+        answer: str, grounding_refs: Optional[list[str]] = None
+    ) -> str:
+        """Submit the final answer when the task is complete. Include grounding_refs listing all files that contributed to the answer."""
+        refs = grounding_refs or []
+        result = _call_vm(holder.get().answer, AnswerRequest(answer=answer, refs=refs))
+
+        print(f"\n{CLI_BLUE}AGENT ANSWER: {answer}{CLI_CLR}")
+        for ref in refs:
+            print(f"- {CLI_BLUE}{ref}{CLI_CLR}")
+
+        return result
+
+    return [
+        tree,
+        search,
+        list_dir,
+        read_file,
+        write_file,
+        delete_file,
+        report_completion,
     ]
 
-    # let's limit number of reasoning steps by 20, just to be safe
-    for i in range(30):
-        step = f"step_{i + 1}"
-        print(f"Next {step}... ", end="")
 
-        started = time.time()
+def build_agent(model: str):
+    """Build the agent once. Returns (agent, vm_holder) — call vm_holder.set() before each task."""
+    holder = VMHolder()
+    llm = ChatOpenAI(model=model, base_url="https://openrouter.ai/api/v1")
+    tools = _create_tools(holder)
+    agent = create_agent(llm, tools=tools, system_prompt=SYSTEM_PROMPT)
+    return agent, holder
 
-        resp = client.beta.chat.completions.parse(
-            model=model,
-            response_format=NextStep,
-            messages=log,
-            max_completion_tokens=16384,
-        )
 
-        job = resp.choices[0].message.parsed
+def run_agent(
+    agent,
+    holder: VMHolder,
+    harness_url: str,
+    task_text: str,
+    langfuse_handler=None,
+    langfuse_metadata=None,
+    run_name=None,
+):
+    """Run a single task. Points the VM to the new harness_url and invokes the agent."""
+    holder.set(harness_url)
 
-        # print next sep for debugging
-        print(job.plan_remaining_steps_brief[0], f"\n  {job.function}")
+    config = {}
+    if langfuse_handler:
+        config["callbacks"] = [langfuse_handler]
+    if langfuse_metadata:
+        config["metadata"] = langfuse_metadata
+    if run_name:
+        config["run_name"] = run_name
 
-        # Let's add tool request to conversation history as if OpenAI asked for it.
-        # a shorter way would be to just append `job.model_dump_json()` entirely
-        log.append(
-            {
-                "role": "assistant",
-                "content": job.plan_remaining_steps_brief[0],
-                "tool_calls": [
-                    {
-                        "type": "function",
-                        "id": step,
-                        "function": {
-                            "name": job.function.__class__.__name__,
-                            "arguments": job.function.model_dump_json(),
-                        },
-                    }
-                ],
-            }
-        )
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": task_text}]},
+        config=config,
+    )
 
-        # now execute the tool by dispatching command to our handler
-        try:
-            result = dispatch(vm, job.function)
-            mappe = MessageToDict(result)
-            txt = json.dumps(mappe, indent=2)
-            print(f"{CLI_GREEN}OUT{CLI_CLR}: {txt}")
-        except ConnectError as e:
-            txt = str(e.message)
-            # print to console as ascii red
-            print(f"{CLI_RED}ERR {e.code}: {e.message}{CLI_CLR}")
+    messages = result.get("messages", [])
+    if messages:
+        final = messages[-1]
+        content = final.content if hasattr(final, "content") else str(final)
+        return content
 
-        # was this the completion?
-        if isinstance(job.function, ReportTaskCompletion):
-            print(f"{CLI_GREEN}agent {job.function.code}{CLI_CLR}. Summary:")
-            for s in job.function.completed_steps_laconic:
-                print(f"- {s}")
-
-            # print answer
-            print(f"\n{CLI_BLUE}AGENT ANSWER: {job.function.answer}{CLI_CLR}")
-            if job.function.grounding_refs:
-                for ref in job.function.grounding_refs:
-                    print(f"- {CLI_BLUE}{ref}{CLI_CLR}")
-
-            return job.function.answer
-
-        # and now we add results back to the convesation history, so that agent
-        # we'll be able to act on the results in the next reasoning step.
-        log.append({"role": "tool", "content": txt, "tool_call_id": step})
+    return None
