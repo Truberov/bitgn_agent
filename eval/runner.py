@@ -72,9 +72,6 @@ async def run_eval(config: dict) -> EvalResult:
         langfuse = None
         session_id = None
 
-    agent = AgentClass()
-    await agent.build()
-
     sem = asyncio.Semaphore(concurrency)
 
     async def run_task(t) -> TaskResult:
@@ -103,6 +100,8 @@ async def run_eval(config: dict) -> EvalResult:
                 }
 
             try:
+                agent = AgentClass()
+                await agent.build()
                 await agent.run(
                     trial.harness_url,
                     trial.instruction,
