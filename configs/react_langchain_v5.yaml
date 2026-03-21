@@ -1,0 +1,5 @@
+prototype: react_langchain_v5
+model: gpt-4.1-2025-04-14
+benchmark: bitgn/pac1-dev
+concurrency: 4
+# task_ids: [t03]
