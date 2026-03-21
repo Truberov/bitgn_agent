@@ -1,118 +1,46 @@
-import os
-import textwrap
+import asyncio
+import sys
 
-from langfuse import get_client
-from langfuse.langchain import CallbackHandler
+import yaml
+from dotenv import load_dotenv
 
-from bitgn.harness_connect import HarnessServiceClientSync
-from bitgn.harness_pb2 import (
-    StatusRequest,
-    GetBenchmarkRequest,
-    StartPlaygroundRequest,
-    EvalPolicy,
-    EndTrialRequest,
-)
 from connectrpc.errors import ConnectError
-
-from agent import build_agent, run_agent
-
-BITGN_URL = os.getenv("BENCHMARK_HOST") or "https://api.bitgn.com"
-
-MODEL_ID = "gpt-4.1-2025-04-14"
+from eval.runner import run_eval
 
 CLI_RED = "\x1b[31m"
 CLI_GREEN = "\x1b[32m"
 CLI_CLR = "\x1b[0m"
 
 
-def main() -> None:
-    # optional task ids could be included as tasks to run, e.g. `python main.py task1 task2`
-    task_filter = os.sys.argv[1:]
+async def main() -> None:
+    load_dotenv()
 
-    agent, vm_holder = build_agent(MODEL_ID)
-    langfuse = get_client()
-    session_id = langfuse.create_trace_id()
+    if len(sys.argv) < 2:
+        print("Usage: python main.py <config.yaml>")
+        sys.exit(1)
 
-    scores = []
+    config_path = sys.argv[1]
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
     try:
-        client = HarnessServiceClientSync(BITGN_URL)
-        print("Connecting to BitGN", client.status(StatusRequest()))
-        res = client.get_benchmark(GetBenchmarkRequest(benchmark_id="bitgn/sandbox"))
-        print(
-            f"{EvalPolicy.Name(res.policy)} benchmark: {res.benchmark_id} with {len(res.tasks)} tasks.\n{CLI_GREEN}{res.description}{CLI_CLR}"
-        )
-
-        for t in res.tasks:
-            if task_filter and t.task_id not in task_filter:
-                continue
-            print("=" * 40)
-            print(f"Starting Task: {t.task_id}")
-
-            trial = client.start_playground(
-                StartPlaygroundRequest(
-                    benchmark_id="bitgn/sandbox",
-                    task_id=t.task_id,
-                )
-            )
-
-            print("Task:", trial.instruction)
-
-            try:
-                langfuse_handler = CallbackHandler()
-                run_agent(
-                    agent,
-                    vm_holder,
-                    trial.harness_url,
-                    trial.instruction,
-                    langfuse_handler,
-                    langfuse_metadata={
-                        "langfuse_session_id": session_id,
-                        "langfuse_tags": ["bitgn", "agent"],
-                    },
-                    run_name=f"task-{t.task_id}",
-                )
-            except Exception as e:
-                print(e)
-
-            result = client.end_trial(EndTrialRequest(trial_id=trial.trial_id))
-
-            if langfuse_handler.last_trace_id:
-                langfuse.create_score(
-                    trace_id=langfuse_handler.last_trace_id,
-                    name="task_score",
-                    value=result.score,
-                    data_type="NUMERIC",
-                )
-
-            if result.score >= 0:
-                scores.append((t.task_id, result.score))
-
-                style = CLI_GREEN if result.score == 1 else CLI_RED
-
-                explain = textwrap.indent("\n".join(result.score_detail), "  ")
-                print(f"\n{style}Score: {result.score:0.2f}\n{explain}\n{CLI_CLR}")
-
+        result = await run_eval(config)
     except ConnectError as e:
-        print(f"{e.code}: {e.message}")
+        print(f"{CLI_RED}{e.code}: {e.message}{CLI_CLR}")
+        sys.exit(1)
     except KeyboardInterrupt:
         print(f"{CLI_RED}Interrupted{CLI_CLR}")
+        sys.exit(1)
 
-    # flush Langfuse traces before exit
-    get_client().flush()
+    # Print summary
+    print("\n" + "=" * 40)
+    print("RESULTS:")
+    for r in result.results:
+        style = CLI_GREEN if r.score == 1 else CLI_RED
+        print(f"  {r.task_id}: {style}{r.score:0.2f}{CLI_CLR}")
 
-    # print scores as table
-    if scores:
-        for tid, score in scores:
-            style = CLI_GREEN if score == 1 else CLI_RED
-            print(f"{tid}: {style}{score:0.2f}{CLI_CLR}")
-
-        # print average
-        total = sum([t[1] for t in scores]) / len(scores) * 100.0
-        print(f"FINAL: {total:0.2f}%")
+    print(f"\nFINAL: {result.avg_score * 100:0.2f}%")
 
 
 if __name__ == "__main__":
-    from dotenv import load_dotenv
-
-    load_dotenv()
-    main()
+    asyncio.run(main())
