@@ -1,6 +1,8 @@
 import os
 import textwrap
 
+from langfuse import get_client, propagate_attributes
+
 from bitgn.harness_connect import HarnessServiceClientSync
 from bitgn.harness_pb2 import (
     StatusRequest,
@@ -52,7 +54,13 @@ def main() -> None:
             print("Task:", trial.instruction)
 
             try:
-                run_agent(MODEL_ID, trial.harness_url, trial.instruction)
+                with propagate_attributes(
+                    trace_name=f"task-{t.task_id}",
+                    session_id=trial.trial_id,
+                    metadata={"benchmark": "bitgn/sandbox", "model": MODEL_ID},
+                    tags=["bitgn", "agent"],
+                ):
+                    run_agent(MODEL_ID, trial.harness_url, trial.instruction)
             except Exception as e:
                 print(e)
 
@@ -70,6 +78,9 @@ def main() -> None:
         print(f"{e.code}: {e.message}")
     except KeyboardInterrupt:
         print(f"{CLI_RED}Interrupted{CLI_CLR}")
+
+    # flush Langfuse traces before exit
+    get_client().flush()
 
     # print scores as table
     if scores:

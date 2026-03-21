@@ -4,7 +4,8 @@ from typing import Annotated, List, Literal, Union
 
 from annotated_types import Ge, Le, MaxLen, MinLen
 from google.protobuf.json_format import MessageToDict
-from openai import OpenAI
+from langfuse.openai import OpenAI
+from langfuse import observe
 from pydantic import BaseModel, Field
 
 from bitgn.vm.mini_connect import MiniRuntimeClientSync
@@ -104,6 +105,7 @@ CLI_CLR = "\x1b[0m"
 CLI_BLUE = "\x1b[34m"
 
 
+@observe(name="dispatch-tool")
 def dispatch(vm: MiniRuntimeClientSync, cmd: BaseModel):
     if isinstance(cmd, Req_Tree):
         return vm.outline(OutlineRequest(path=cmd.path))
@@ -125,6 +127,7 @@ def dispatch(vm: MiniRuntimeClientSync, cmd: BaseModel):
     raise ValueError(f"Unknown command: {cmd}")
 
 
+@observe(name="run-agent")
 def run_agent(model: str, harness_url: str, task_text: str):
     vm = MiniRuntimeClientSync(harness_url)
 
@@ -194,7 +197,8 @@ def run_agent(model: str, harness_url: str, task_text: str):
             if job.function.grounding_refs:
                 for ref in job.function.grounding_refs:
                     print(f"- {CLI_BLUE}{ref}{CLI_CLR}")
-            break
+
+            return job.function.answer
 
         # and now we add results back to the convesation history, so that agent
         # we'll be able to act on the results in the next reasoning step.
