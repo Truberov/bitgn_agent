@@ -1,0 +1,17 @@
+[project]
+name = "bitgn-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bitgn-api-connectrpc-python>=0.9.0.1.20260316101438",
+    "bitgn-api-protocolbuffers-python>=34.1.0.1.20260316101438",
+    "openai>=2.29.0",
+    "pydantic>=2.12.5",
+    "ruff>=0.15.7",
+]
+
+[[tool.uv.index]]
+name = "buf"
+url = "https://buf.build/gen/python"
