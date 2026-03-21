@@ -51,8 +51,10 @@ class BaseAgent(ABC):
         ...
 
     @abstractmethod
-    async def run(self, harness_url: str, instruction: str) -> str | None:
-        """Run the agent on a single task. Returns answer or None."""
+    async def run(self, harness_url: str, instruction: str, config: dict | None = None) -> str | None:
+        """Run the agent on a single task.
+        config: LangChain invoke config (callbacks, metadata, run_name).
+        Returns answer or None."""
         ...
 ```
 
@@ -127,8 +129,8 @@ async def run_eval(config: dict) -> EvalResult:
        a. async with sem
        b. agent = AgentClass(); await agent.build()
        c. Start playground: await harness.start_playground(...)
-       d. Create Langfuse CallbackHandler with session_id
-       e. result = await agent.run(harness_url, instruction)
+       d. Build langchain invoke config: {callbacks: [handler], metadata: {...}, run_name: ...}
+       e. result = await agent.run(harness_url, instruction, config=invoke_config)
        f. End trial: await harness.end_trial(EndTrialRequest(trial_id=...))
        g. Extract score and score_detail from response
        h. Report score to Langfuse via langfuse.create_score(...)
@@ -188,7 +190,17 @@ if __name__ == "__main__":
 ## Langfuse Integration
 
 - One `session_id` per eval run (groups all task traces together)
-- Each task creates a `CallbackHandler(session_id=session_id, tags=["bitgn", "agent"])`
+- Langfuse info is passed to the agent via LangChain invoke config dict:
+  ```python
+  config = {}
+  if langfuse_handler:
+      config["callbacks"] = [langfuse_handler]
+  if langfuse_metadata:
+      config["metadata"] = langfuse_metadata
+  if run_name:
+      config["run_name"] = run_name
+  ```
+- `BaseAgent.run()` receives this config and passes it to `agent.ainvoke(input, config=config)`
 - After `end_trial`, score is reported via `langfuse.create_score(trace_id, "task_score", score, data_type="NUMERIC")`
 
 ## BitGN API Usage
@@ -206,7 +218,7 @@ if __name__ == "__main__":
 
 ## Dependencies
 
-Add to `pyproject.toml`:
+User installs manually. Required new dependency:
 - `pyyaml` — YAML config parsing
 
 ## Out of Scope
