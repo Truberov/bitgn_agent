@@ -17,9 +17,9 @@ prototypes/baseline/     — Reference agent implementation (LangChain + OpenAI 
 
 ### Agent Lifecycle
 
-1. `AgentClass()` — fresh instance per task
-2. `agent.build()` — init LLM, tools, graph
-3. `agent.run(harness_url, instruction, config)` — execute task against VM
+1. `AgentClass()` — single instance created once per eval
+2. `agent.build()` — init LLM, tools, graph (called once)
+3. `agent.run(harness_url, instruction, config)` — reused for each task; per-task state (`_vm`) is reset inside `run()`
 4. Harness scores the result via `end_trial`
 
 ### Key Dependencies
