@@ -9,11 +9,15 @@ dependencies = [
     "bitgn-api-protocolbuffers-python>=34.1.0.1.20260316101438",
     "langchain>=1.2.13",
     "langchain-openai>=1.1.11",
-    "langfuse>=4.0.1",
     "openai>=2.29.0",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.2",
     "ruff>=0.15.7",
+]
+
+[project.optional-dependencies]
+observability = [
+    "langfuse>=4.0.1",
 ]
 
 [[tool.uv.index]]
