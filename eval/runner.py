@@ -46,20 +46,20 @@ def _init_braintrust():
     """Best-effort Braintrust setup for environments where observability is configured."""
     api_key = os.getenv("BRAINTRUST_API_KEY")
     if not api_key:
-        return None, None
+        return None
 
     try:
         from braintrust import init_logger
-        from braintrust_langchain import BraintrustCallbackHandler
+        from braintrust_langchain import BraintrustCallbackHandler, set_global_handler
 
         logger = init_logger(
             project=_BRAINTRUST_PROJECT,
             api_key=api_key,
-            set_current=False,
         )
-        return logger, BraintrustCallbackHandler
+        set_global_handler(BraintrustCallbackHandler())
+        return logger
     except Exception:
-        return None, None
+        return None
 
 
 def _log_braintrust_score(
@@ -114,8 +114,8 @@ async def run_eval(config: dict) -> EvalResult:
     if task_filter:
         tasks = [t for t in tasks if t.task_id in task_filter]
 
-    braintrust_logger, braintrust_handler_cls = _init_braintrust()
-    if braintrust_logger and braintrust_handler_cls:
+    braintrust_logger = _init_braintrust()
+    if braintrust_logger:
         print("Braintrust tracing enabled")
     else:
         print("Braintrust tracing disabled")
@@ -135,17 +135,9 @@ async def run_eval(config: dict) -> EvalResult:
             )
             print("Task:", trial.instruction)
 
-            braintrust_handler = (
-                braintrust_handler_cls()
-                if braintrust_logger and braintrust_handler_cls
-                else None
-            )
             invoke_config = {}
-            if braintrust_handler:
-                invoke_config = {
-                    "callbacks": [braintrust_handler],
-                    "run_name": f"task-{t.task_id}",
-                }
+            if braintrust_logger:
+                invoke_config = {"run_name": f"task-{t.task_id}"}
 
             try:
                 agent = AgentClass()
