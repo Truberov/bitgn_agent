@@ -167,7 +167,7 @@ class RunnerBraintrustOptionalTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 runner,
                 "_init_braintrust",
-                return_value=(fake_logger, FakeCallbackHandler),
+                return_value=fake_logger,
             ),
             contextlib.redirect_stdout(stdout),
         ):
@@ -182,11 +182,7 @@ class RunnerBraintrustOptionalTests(unittest.IsolatedAsyncioTestCase):
         output = stdout.getvalue()
         self.assertEqual(result.avg_score, 1.0)
         self.assertIn("Braintrust tracing enabled", output)
-        self.assertEqual(len(self.agent_class.last_config["callbacks"]), 1)
-        self.assertIsInstance(
-            self.agent_class.last_config["callbacks"][0],
-            FakeCallbackHandler,
-        )
+        self.assertEqual(self.agent_class.last_config, {"run_name": "task-task-1"})
         self.assertEqual(
             fake_logger.logged_rows,
             [
@@ -206,6 +202,50 @@ class RunnerBraintrustOptionalTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+
+    async def test_init_braintrust_registers_global_handler(self) -> None:
+        runner = importlib.import_module("eval.runner")
+
+        class FakeLogger:
+            pass
+
+        fake_logger = FakeLogger()
+        calls = {}
+
+        braintrust = types.ModuleType("braintrust")
+
+        def fake_init_logger(**kwargs):
+            calls["init"] = kwargs
+            return fake_logger
+
+        braintrust.init_logger = fake_init_logger
+
+        braintrust_langchain = types.ModuleType("braintrust_langchain")
+
+        class FakeCallbackHandler:
+            pass
+
+        def fake_set_global_handler(handler):
+            calls["handler"] = handler
+
+        braintrust_langchain.BraintrustCallbackHandler = FakeCallbackHandler
+        braintrust_langchain.set_global_handler = fake_set_global_handler
+
+        sys.modules["braintrust"] = braintrust
+        sys.modules["braintrust_langchain"] = braintrust_langchain
+
+        with patch.dict(os.environ, {"BRAINTRUST_API_KEY": "test-key"}, clear=False):
+            logger = runner._init_braintrust()
+
+        self.assertIs(logger, fake_logger)
+        self.assertEqual(
+            calls["init"],
+            {
+                "project": "bitgn-agent",
+                "api_key": "test-key",
+            },
+        )
+        self.assertIsInstance(calls["handler"], FakeCallbackHandler)
 
 
 if __name__ == "__main__":
