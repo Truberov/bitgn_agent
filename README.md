@@ -8,8 +8,8 @@ Base eval dependencies:
 uv sync
 ```
 
-Optional Langfuse observability:
+Braintrust tracing:
 
 ```bash
-uv sync --extra observability
+export BRAINTRUST_API_KEY="..."
 ```

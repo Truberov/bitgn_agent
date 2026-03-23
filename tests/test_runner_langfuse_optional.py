@@ -2,6 +2,7 @@ import builtins
 import contextlib
 import importlib
 import io
+import os
 import sys
 import types
 import unittest
@@ -14,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-class RunnerLangfuseOptionalTests(unittest.IsolatedAsyncioTestCase):
+class RunnerBraintrustOptionalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._saved_modules = {}
         for name in [
@@ -23,8 +24,8 @@ class RunnerLangfuseOptionalTests(unittest.IsolatedAsyncioTestCase):
             "bitgn.harness_connect",
             "bitgn.harness_pb2",
             "prototypes",
-            "langfuse",
-            "langfuse.langchain",
+            "braintrust",
+            "braintrust_langchain",
         ]:
             self._saved_modules[name] = sys.modules.pop(name, None)
 
@@ -106,8 +107,8 @@ class RunnerLangfuseOptionalTests(unittest.IsolatedAsyncioTestCase):
             "bitgn.harness_connect",
             "bitgn.harness_pb2",
             "prototypes",
-            "langfuse",
-            "langfuse.langchain",
+            "braintrust",
+            "braintrust_langchain",
         ]:
             sys.modules.pop(name, None)
 
@@ -115,15 +116,23 @@ class RunnerLangfuseOptionalTests(unittest.IsolatedAsyncioTestCase):
             if module is not None:
                 sys.modules[name] = module
 
-    async def test_run_eval_works_when_langfuse_is_unavailable(self) -> None:
+    async def test_run_eval_works_when_braintrust_is_unavailable(self) -> None:
         original_import = builtins.__import__
 
         def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if name == "langfuse" or name.startswith("langfuse."):
-                raise ImportError("langfuse is intentionally unavailable")
+            if name == "braintrust" or name.startswith("braintrust."):
+                raise ImportError("braintrust is intentionally unavailable")
+            if name == "braintrust_langchain" or name.startswith(
+                "braintrust_langchain."
+            ):
+                raise ImportError("braintrust_langchain is intentionally unavailable")
             return original_import(name, globals, locals, fromlist, level)
 
-        with patch("builtins.__import__", side_effect=fake_import):
+        with (
+            patch("builtins.__import__", side_effect=fake_import),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("BRAINTRUST_API_KEY", None)
             runner = importlib.import_module("eval.runner")
             result = await runner.run_eval(
                 {
@@ -136,40 +145,29 @@ class RunnerLangfuseOptionalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.avg_score, 1.0)
         self.assertEqual(self.agent_class.last_config, {})
 
-    async def test_run_eval_prints_trace_details_when_langfuse_is_enabled(self) -> None:
+    async def test_run_eval_logs_score_when_braintrust_is_enabled(self) -> None:
         runner = importlib.import_module("eval.runner")
 
-        class FakeTraceApi:
-            def get(self, trace_id):
-                return types.SimpleNamespace(id=trace_id)
-
-        class FakeLangfuse:
+        class FakeLogger:
             def __init__(self) -> None:
-                self.created_scores = []
-                self.flushed = False
-                self.api = types.SimpleNamespace(trace=FakeTraceApi())
+                self.logged_rows = []
 
-            def create_score(self, **kwargs):
-                self.created_scores.append(kwargs)
-
-            def get_trace_url(self, *, trace_id: str) -> str:
-                return f"https://langfuse.example/trace/{trace_id}"
-
-            def flush(self) -> None:
-                self.flushed = True
+            def log(self, **kwargs) -> str:
+                self.logged_rows.append(kwargs)
+                return "row-123"
 
         class FakeCallbackHandler:
-            def __init__(self) -> None:
-                self.last_trace_id = "trace-123"
+            pass
 
-        fake_langfuse = FakeLangfuse()
+        fake_logger = FakeLogger()
         stdout = io.StringIO()
 
         with (
+            patch.dict(os.environ, {"BRAINTRUST_API_KEY": "test-key"}, clear=False),
             patch.object(
                 runner,
-                "_init_langfuse",
-                return_value=(fake_langfuse, FakeCallbackHandler, "session-123"),
+                "_init_braintrust",
+                return_value=(fake_logger, FakeCallbackHandler),
             ),
             contextlib.redirect_stdout(stdout),
         ):
@@ -183,77 +181,31 @@ class RunnerLangfuseOptionalTests(unittest.IsolatedAsyncioTestCase):
 
         output = stdout.getvalue()
         self.assertEqual(result.avg_score, 1.0)
-        self.assertIn("Langfuse tracing enabled", output)
-        self.assertIn("Trace ID: trace-123", output)
-        self.assertIn("Trace URL: https://langfuse.example/trace/trace-123", output)
-        self.assertTrue(fake_langfuse.flushed)
+        self.assertIn("Braintrust tracing enabled", output)
+        self.assertEqual(len(self.agent_class.last_config["callbacks"]), 1)
+        self.assertIsInstance(
+            self.agent_class.last_config["callbacks"][0],
+            FakeCallbackHandler,
+        )
         self.assertEqual(
-            fake_langfuse.created_scores,
+            fake_logger.logged_rows,
             [
                 {
-                    "trace_id": "trace-123",
-                    "name": "task_score",
-                    "value": 1.0,
-                    "data_type": "NUMERIC",
+                    "input": {
+                        "benchmark_id": "bench-1",
+                        "task_id": "task-1",
+                        "instruction": "solve it",
+                    },
+                    "output": {"score_detail": ["ok"]},
+                    "scores": {"task_score": 1.0},
+                    "metadata": {
+                        "prototype": "baseline",
+                        "harness_url": "https://harness.local",
+                    },
+                    "tags": ["bitgn", "agent"],
                 }
             ],
         )
-
-    async def test_run_eval_warns_when_trace_is_not_queryable(self) -> None:
-        runner = importlib.import_module("eval.runner")
-
-        class FakeTraceApi:
-            def get(self, trace_id):
-                raise RuntimeError(f"trace {trace_id} is missing")
-
-        class FakeLangfuse:
-            def __init__(self) -> None:
-                self.created_scores = []
-                self.flushed = False
-                self.api = types.SimpleNamespace(trace=FakeTraceApi())
-
-            def create_score(self, **kwargs):
-                self.created_scores.append(kwargs)
-
-            def get_trace_url(self, *, trace_id: str) -> str:
-                return f"https://langfuse.example/trace/{trace_id}"
-
-            def flush(self) -> None:
-                self.flushed = True
-
-        class FakeCallbackHandler:
-            def __init__(self) -> None:
-                self.last_trace_id = "trace-missing"
-
-        fake_langfuse = FakeLangfuse()
-        stdout = io.StringIO()
-
-        async def fake_sleep(_delay):
-            return None
-
-        with (
-            patch.object(
-                runner,
-                "_init_langfuse",
-                return_value=(fake_langfuse, FakeCallbackHandler, "session-123"),
-            ),
-            patch.object(runner, "_TRACE_READY_MAX_ATTEMPTS", 2),
-            patch.object(runner, "_TRACE_READY_DELAY_SECONDS", 0),
-            patch.object(runner.asyncio, "sleep", side_effect=fake_sleep),
-            contextlib.redirect_stdout(stdout),
-        ):
-            await runner.run_eval(
-                {
-                    "prototype": "baseline",
-                    "benchmark": "bench-1",
-                    "task_ids": ["task-1"],
-                }
-            )
-
-        output = stdout.getvalue()
-        self.assertIn("Trace ID: trace-missing", output)
-        self.assertIn("Trace not yet queryable in Langfuse", output)
-        self.assertNotIn("Trace URL: https://langfuse.example/trace/trace-missing", output)
 
 
 if __name__ == "__main__":

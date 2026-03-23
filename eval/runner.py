@@ -19,8 +19,7 @@ CLI_GREEN = "\x1b[32m"
 CLI_CLR = "\x1b[0m"
 
 BITGN_URL = os.getenv("BENCHMARK_HOST") or "https://api.bitgn.com"
-_TRACE_READY_MAX_ATTEMPTS = 30
-_TRACE_READY_DELAY_SECONDS = 1
+_BRAINTRUST_PROJECT = "bitgn-agent"
 
 
 @dataclass
@@ -43,35 +42,54 @@ class EvalResult:
         return sum(r.score for r in self.results) / len(self.results)
 
 
-def _init_langfuse():
-    """Best-effort Langfuse setup for environments where observability is installed."""
-    try:
-        from langfuse import get_client
-        from langfuse.langchain import CallbackHandler
+def _init_braintrust():
+    """Best-effort Braintrust setup for environments where observability is configured."""
+    api_key = os.getenv("BRAINTRUST_API_KEY")
+    if not api_key:
+        return None, None
 
-        langfuse = get_client()
-        session_id = langfuse.create_trace_id()
-        return langfuse, CallbackHandler, session_id
+    try:
+        from braintrust import init_logger
+        from braintrust_langchain import BraintrustCallbackHandler
+
+        logger = init_logger(
+            project=_BRAINTRUST_PROJECT,
+            api_key=api_key,
+            set_current=False,
+        )
+        return logger, BraintrustCallbackHandler
     except Exception:
-        return None, None, None
+        return None, None
 
 
-def _get_trace_url(langfuse, trace_id: str) -> Optional[str]:
+def _log_braintrust_score(
+    logger,
+    *,
+    benchmark_id: str,
+    task_id: str,
+    instruction: str,
+    harness_url: str,
+    prototype_name: str,
+    score: float,
+    score_detail: list[str],
+) -> Optional[str]:
     try:
-        return langfuse.get_trace_url(trace_id=trace_id)
+        return logger.log(
+            input={
+                "benchmark_id": benchmark_id,
+                "task_id": task_id,
+                "instruction": instruction,
+            },
+            output={"score_detail": score_detail},
+            scores={"task_score": score},
+            metadata={
+                "prototype": prototype_name,
+                "harness_url": harness_url,
+            },
+            tags=["bitgn", "agent"],
+        )
     except Exception:
         return None
-
-
-async def _trace_is_queryable(langfuse, trace_id: str) -> bool:
-    for attempt in range(_TRACE_READY_MAX_ATTEMPTS):
-        try:
-            langfuse.api.trace.get(trace_id)
-            return True
-        except Exception:
-            if attempt < _TRACE_READY_MAX_ATTEMPTS - 1:
-                await asyncio.sleep(_TRACE_READY_DELAY_SECONDS)
-    return False
 
 
 async def run_eval(config: dict) -> EvalResult:
@@ -96,11 +114,11 @@ async def run_eval(config: dict) -> EvalResult:
     if task_filter:
         tasks = [t for t in tasks if t.task_id in task_filter]
 
-    langfuse, langfuse_handler_cls, session_id = _init_langfuse()
-    if langfuse and langfuse_handler_cls:
-        print(f"Langfuse tracing enabled (session: {session_id})")
+    braintrust_logger, braintrust_handler_cls = _init_braintrust()
+    if braintrust_logger and braintrust_handler_cls:
+        print("Braintrust tracing enabled")
     else:
-        print("Langfuse tracing disabled")
+        print("Braintrust tracing disabled")
 
     sem = asyncio.Semaphore(concurrency)
 
@@ -117,17 +135,15 @@ async def run_eval(config: dict) -> EvalResult:
             )
             print("Task:", trial.instruction)
 
-            langfuse_handler = (
-                langfuse_handler_cls() if langfuse and langfuse_handler_cls else None
+            braintrust_handler = (
+                braintrust_handler_cls()
+                if braintrust_logger and braintrust_handler_cls
+                else None
             )
             invoke_config = {}
-            if langfuse_handler:
+            if braintrust_handler:
                 invoke_config = {
-                    "callbacks": [langfuse_handler],
-                    "metadata": {
-                        "langfuse_session_id": session_id,
-                        "langfuse_tags": ["bitgn", "agent"],
-                    },
+                    "callbacks": [braintrust_handler],
                     "run_name": f"task-{t.task_id}",
                 }
 
@@ -145,24 +161,17 @@ async def run_eval(config: dict) -> EvalResult:
                 EndTrialRequest(trial_id=trial.trial_id)
             )
 
-            if langfuse_handler and langfuse_handler.last_trace_id:
-                trace_id = langfuse_handler.last_trace_id
-                langfuse.create_score(
-                    trace_id=trace_id,
-                    name="task_score",
-                    value=result.score,
-                    data_type="NUMERIC",
+            if braintrust_logger:
+                _log_braintrust_score(
+                    braintrust_logger,
+                    benchmark_id=benchmark_id,
+                    task_id=t.task_id,
+                    instruction=trial.instruction,
+                    harness_url=trial.harness_url,
+                    prototype_name=prototype_name,
+                    score=result.score,
+                    score_detail=list(result.score_detail),
                 )
-                langfuse.flush()
-                print(f"Trace ID: {trace_id}")
-                if await _trace_is_queryable(langfuse, trace_id):
-                    trace_url = _get_trace_url(langfuse, trace_id)
-                    if trace_url:
-                        print(f"Trace URL: {trace_url}")
-                else:
-                    print(
-                        f"{CLI_RED}Trace not yet queryable in Langfuse: {trace_id}{CLI_CLR}"
-                    )
 
             score = result.score if result.score >= 0 else 0.0
             details = "\n".join(result.score_detail)
@@ -190,9 +199,6 @@ async def run_eval(config: dict) -> EvalResult:
             )
         else:
             final_results.append(r)
-
-    if langfuse:
-        langfuse.flush()
 
     return EvalResult(
         prototype=prototype_name,
