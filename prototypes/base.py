@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 
 class BaseAgent(ABC):
     last_run_id: str | None = None
+    last_messages: list | None = None
 
     @abstractmethod
     async def run(

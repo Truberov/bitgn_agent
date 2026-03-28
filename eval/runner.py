@@ -16,6 +16,14 @@ from bitgn.harness_pb2 import (
 )
 
 from prototypes import load_prototype
+from eval.run_logger import (
+    generate_run_id,
+    create_run_dir,
+    format_task_log,
+    format_error_log,
+    write_task_log,
+    write_run_summary,
+)
 
 
 CLI_RED = "\x1B[31m"
@@ -55,6 +63,10 @@ async def run_eval(config: dict) -> EvalResult:
         "model": config.get("model", os.environ.get("MODEL_ID", "gpt-4.1-2025-04-14")),
         "thread_id": str(uuid.uuid4()),
     }
+
+    run_id = generate_run_id()
+    run_dir = create_run_dir(run_id)
+    print(f"Run logs: {run_dir}")
 
     ls_client = LangSmithClient()
     AgentClass = load_prototype(prototype_name)
@@ -109,6 +121,26 @@ async def run_eval(config: dict) -> EvalResult:
                 f"{textwrap.indent(details, '  ')}\n{CLI_CLR}"
             )
 
+            # Write task log
+            messages = getattr(agent, "last_messages", None)
+            if messages:
+                log_content = format_task_log(
+                    task_id=task.task_id,
+                    instruction=trial.instruction,
+                    messages=messages,
+                    score=score,
+                    score_details=details,
+                )
+            else:
+                log_content = format_error_log(
+                    task_id=task.task_id,
+                    instruction=trial.instruction,
+                    error="No messages captured (agent may have failed before execution)",
+                    score=score,
+                    score_details=details,
+                )
+            write_task_log(run_dir, task.task_id, log_content)
+
             run_id = getattr(agent, "last_run_id", None)
             if run_id:
                 try:
@@ -134,5 +166,7 @@ async def run_eval(config: dict) -> EvalResult:
             task_results.append(TaskResult(tasks[i].task_id, 0.0, str(r)))
         else:
             task_results.append(r)
+
+    write_run_summary(run_dir, task_results, config)
 
     return EvalResult(results=task_results)

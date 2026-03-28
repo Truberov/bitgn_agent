@@ -16,6 +16,7 @@ dependencies = [
     "ruff>=0.15.7",
     "protobuf==7.34.1",
     "langsmith>=0.7.22",
+    "deepagents>=0.4.12",
 ]
 
 [[tool.uv.index]]
