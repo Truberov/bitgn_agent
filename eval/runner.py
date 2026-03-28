@@ -48,8 +48,7 @@ async def run_eval(config: dict) -> EvalResult:
     task_filter = set(config.get("task_ids", []))
 
     agent_config = {
-        "model": os.environ.get("MODEL_ID", "gpt-4.1-2025-04-14"),
-        "hint": os.environ.get("HINT", ""),
+        "model": config.get("model", os.environ.get("MODEL_ID", "gpt-4.1-2025-04-14")),
     }
 
     AgentClass = load_prototype(prototype_name)

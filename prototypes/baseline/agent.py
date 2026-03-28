@@ -317,9 +317,8 @@ class Agent(BaseAgent):
         self,
         harness_url: str,
         instruction: str,
-        config: dict | None = None,
+        config: dict,
     ) -> str | None:
-        config = config or {}
         model = config.get("model", os.environ.get("MODEL_ID", "gpt-4.1-2025-04-14"))
         hint = config.get("hint", os.environ.get("HINT", ""))
 
