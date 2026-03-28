@@ -1,7 +1,10 @@
 import asyncio
 import os
 import textwrap
+import uuid
 from dataclasses import dataclass
+
+from langsmith import Client as LangSmithClient
 
 from bitgn.harness_connect import HarnessServiceClient
 from bitgn.harness_pb2 import (
@@ -27,6 +30,7 @@ class TaskResult:
     task_id: str
     score: float
     details: str
+    run_id: str | None = None
 
 
 @dataclass
@@ -49,8 +53,10 @@ async def run_eval(config: dict) -> EvalResult:
 
     agent_config = {
         "model": config.get("model", os.environ.get("MODEL_ID", "gpt-4.1-2025-04-14")),
+        "thread_id": str(uuid.uuid4()),
     }
 
+    ls_client = LangSmithClient()
     AgentClass = load_prototype(prototype_name)
 
     bitgn_url = os.environ.get("BENCHMARK_HOST", "https://api.bitgn.com")
@@ -83,9 +89,11 @@ async def run_eval(config: dict) -> EvalResult:
             )
             print(f"{CLI_BLUE}{trial.instruction}{CLI_CLR}\n{'-' * 80}")
 
+            task_config = {**agent_config, "run_name": task.task_id}
+
             agent = AgentClass()
             try:
-                await agent.run(trial.harness_url, trial.instruction, agent_config)
+                await agent.run(trial.harness_url, trial.instruction, task_config)
             except Exception as exc:
                 print(f"{CLI_RED}Agent error: {exc}{CLI_CLR}")
 
@@ -100,7 +108,20 @@ async def run_eval(config: dict) -> EvalResult:
                 f"\n{style}Score: {result.score:0.2f}\n"
                 f"{textwrap.indent(details, '  ')}\n{CLI_CLR}"
             )
-            return TaskResult(task.task_id, score, details)
+
+            run_id = getattr(agent, "last_run_id", None)
+            if run_id:
+                try:
+                    ls_client.create_feedback(
+                        run_id=run_id,
+                        key="score",
+                        score=score,
+                        comment=details,
+                    )
+                except Exception as exc:
+                    print(f"{CLI_YELLOW}LangSmith feedback error: {exc}{CLI_CLR}")
+
+            return TaskResult(task.task_id, score, details, run_id=run_id)
 
     raw_results = await asyncio.gather(
         *[run_task(t) for t in tasks], return_exceptions=True
