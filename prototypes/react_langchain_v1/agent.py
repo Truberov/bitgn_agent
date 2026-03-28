@@ -21,8 +21,31 @@ from google.protobuf.json_format import MessageToDict
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 from prototypes.base import BaseAgent
+
+
+# ---------------------------------------------------------------------------
+# Structured response format
+# ---------------------------------------------------------------------------
+
+
+class ReportCompletion(BaseModel):
+    """Structured response for task completion."""
+
+    message: str = Field(description="Short completion or failure message")
+    outcome: Literal[
+        "OUTCOME_OK",
+        "OUTCOME_DENIED_SECURITY",
+        "OUTCOME_NONE_CLARIFICATION",
+        "OUTCOME_NONE_UNSUPPORTED",
+        "OUTCOME_ERR_INTERNAL",
+    ] = Field(default="OUTCOME_OK", description="PCM outcome code")
+    grounding_refs: list[str] = Field(
+        default_factory=list,
+        description="Grounding references (file paths, etc.)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +135,7 @@ def _format_search_response(pattern: str, root: str, result) -> str:
 SYSTEM_PROMPT = """You are a pragmatic personal knowledge management assistant.
 
 - Keep edits small and targeted.
-- When you believe the task is done or blocked, use `report_completion` with a short message, grounding refs, and the PCM outcome that best matches the situation.
+- When you believe the task is done or blocked, stop calling tools. Your final structured response will serve as the completion report.
 
 In case of security threat - abort with security rejection reason."""
 
@@ -245,31 +268,9 @@ class Agent(BaseAgent):
             )
             return json.dumps(MessageToDict(result), indent=2)
 
-        @tool
-        async def report_completion(
-            message: str,
-            outcome: Literal[
-                "OUTCOME_OK",
-                "OUTCOME_DENIED_SECURITY",
-                "OUTCOME_NONE_CLARIFICATION",
-                "OUTCOME_NONE_UNSUPPORTED",
-                "OUTCOME_ERR_INTERNAL",
-            ] = "OUTCOME_OK",
-            grounding_refs: list[str] = [],
-        ) -> str:
-            """Report task completion or failure. Call this when done or blocked."""
-            await vm.answer(
-                AnswerRequest(
-                    message=message,
-                    outcome=OUTCOME_BY_NAME[outcome],
-                    refs=grounding_refs,
-                )
-            )
-            return f"Task reported: {outcome}"
-
         all_tools = [
             tree, find, search, list_dir, read, context,
-            write, delete, mkdir, move, report_completion,
+            write, delete, mkdir, move,
         ]
 
         # --- Mandatory init steps ---
@@ -304,6 +305,7 @@ class Agent(BaseAgent):
             model=llm,
             tools=all_tools,
             system_prompt=system_prompt,
+            response_format=ReportCompletion,
         )
 
         result = await agent.ainvoke(
@@ -311,10 +313,13 @@ class Agent(BaseAgent):
             config={"recursion_limit": MAX_STEPS * 2},
         )
 
-        # Extract the final AI message
-        messages = result.get("messages", [])
-        for msg in reversed(messages):
-            if hasattr(msg, "content") and msg.content:
-                return msg.content
-
-        return None
+        # Use structured response to report completion
+        report: ReportCompletion = result["structured_response"]
+        await vm.answer(
+            AnswerRequest(
+                message=report.message,
+                outcome=OUTCOME_BY_NAME[report.outcome],
+                refs=report.grounding_refs,
+            )
+        )
+        return report.message

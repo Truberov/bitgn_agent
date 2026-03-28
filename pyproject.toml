@@ -14,6 +14,8 @@ dependencies = [
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.2",
     "ruff>=0.15.7",
+    "protobuf==7.34.1",
+    "langsmith>=0.7.22",
 ]
 
 [[tool.uv.index]]
