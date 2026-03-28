@@ -17,6 +17,7 @@ from bitgn.vm.pcm_pb2 import (
     TreeRequest,
     WriteRequest,
 )
+from connectrpc.errors import ConnectError
 from google.protobuf.json_format import MessageToDict
 from langchain.agents import create_agent
 from langchain_core.tools import tool
@@ -167,8 +168,11 @@ class Agent(BaseAgent):
             root: str = "",
         ) -> str:
             """Show directory tree. `level` controls depth (0=unlimited), `root` is the starting path (empty=repo root)."""
-            result = await vm.tree(TreeRequest(root=root, level=level))
-            return _format_tree_response(root or "/", level, result)
+            try:
+                result = await vm.tree(TreeRequest(root=root, level=level))
+                return _format_tree_response(root or "/", level, result)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def find(
@@ -178,15 +182,18 @@ class Agent(BaseAgent):
             limit: int = 10,
         ) -> str:
             """Find files/dirs by name. `kind` filters type, `limit` caps results."""
-            result = await vm.find(
-                FindRequest(
-                    root=root,
-                    name=name,
-                    type={"all": 0, "files": 1, "dirs": 2}[kind],
-                    limit=limit,
+            try:
+                result = await vm.find(
+                    FindRequest(
+                        root=root,
+                        name=name,
+                        type={"all": 0, "files": 1, "dirs": 2}[kind],
+                        limit=limit,
+                    )
                 )
-            )
-            return json.dumps(MessageToDict(result), indent=2)
+                return json.dumps(MessageToDict(result), indent=2)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def search(
@@ -195,16 +202,22 @@ class Agent(BaseAgent):
             limit: int = 10,
         ) -> str:
             """Grep-like content search. Returns matching lines with file paths."""
-            result = await vm.search(
-                SearchRequest(root=root, pattern=pattern, limit=limit)
-            )
-            return _format_search_response(pattern, root, result)
+            try:
+                result = await vm.search(
+                    SearchRequest(root=root, pattern=pattern, limit=limit)
+                )
+                return _format_search_response(pattern, root, result)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def list_dir(path: str = "/") -> str:
             """List directory contents (like `ls`)."""
-            result = await vm.list(ListRequest(name=path))
-            return _format_list_response(path, result)
+            try:
+                result = await vm.list(ListRequest(name=path))
+                return _format_list_response(path, result)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def read(
@@ -214,21 +227,27 @@ class Agent(BaseAgent):
             end_line: int = 0,
         ) -> str:
             """Read file content. Optionally show line numbers or a line range (1-based, inclusive)."""
-            result = await vm.read(
-                ReadRequest(
-                    path=path,
-                    number=number,
-                    start_line=start_line,
-                    end_line=end_line,
+            try:
+                result = await vm.read(
+                    ReadRequest(
+                        path=path,
+                        number=number,
+                        start_line=start_line,
+                        end_line=end_line,
+                    )
                 )
-            )
-            return _format_read_response(path, number, start_line, end_line, result)
+                return _format_read_response(path, number, start_line, end_line, result)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def context() -> str:
             """Get repository context / metadata."""
-            result = await vm.context(ContextRequest())
-            return json.dumps(MessageToDict(result), indent=2)
+            try:
+                result = await vm.context(ContextRequest())
+                return json.dumps(MessageToDict(result), indent=2)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def write(
@@ -238,35 +257,47 @@ class Agent(BaseAgent):
             end_line: int = 0,
         ) -> str:
             """Write or patch a file. `start_line`/`end_line` (1-based) for ranged writes; 0 = whole-file overwrite."""
-            result = await vm.write(
-                WriteRequest(
-                    path=path,
-                    content=content,
-                    start_line=start_line,
-                    end_line=end_line,
+            try:
+                result = await vm.write(
+                    WriteRequest(
+                        path=path,
+                        content=content,
+                        start_line=start_line,
+                        end_line=end_line,
+                    )
                 )
-            )
-            return json.dumps(MessageToDict(result), indent=2)
+                return json.dumps(MessageToDict(result), indent=2)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def delete(path: str) -> str:
             """Delete a file or directory."""
-            result = await vm.delete(DeleteRequest(path=path))
-            return json.dumps(MessageToDict(result), indent=2)
+            try:
+                result = await vm.delete(DeleteRequest(path=path))
+                return json.dumps(MessageToDict(result), indent=2)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def mkdir(path: str) -> str:
             """Create a directory (and parents)."""
-            result = await vm.mk_dir(MkDirRequest(path=path))
-            return json.dumps(MessageToDict(result), indent=2)
+            try:
+                result = await vm.mk_dir(MkDirRequest(path=path))
+                return json.dumps(MessageToDict(result), indent=2)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         @tool
         async def move(from_name: str, to_name: str) -> str:
             """Move / rename a file or directory."""
-            result = await vm.move(
-                MoveRequest(from_name=from_name, to_name=to_name)
-            )
-            return json.dumps(MessageToDict(result), indent=2)
+            try:
+                result = await vm.move(
+                    MoveRequest(from_name=from_name, to_name=to_name)
+                )
+                return json.dumps(MessageToDict(result), indent=2)
+            except ConnectError as exc:
+                return f"Error: {exc.message}"
 
         all_tools = [
             tree, find, search, list_dir, read, context,
