@@ -1,10 +1,11 @@
 import json
 import os
 import shlex
+import time
 from typing import Annotated, List, Literal, Union
 
 from annotated_types import Ge, Le, MaxLen, MinLen
-from bitgn.vm.pcm_connect import PcmRuntimeClient
+from bitgn.vm.pcm_connect import PcmRuntimeClientSync
 from bitgn.vm.pcm_pb2 import (
     AnswerRequest,
     ContextRequest,
@@ -19,17 +20,16 @@ from bitgn.vm.pcm_pb2 import (
     TreeRequest,
     WriteRequest,
 )
-from connectrpc.errors import ConnectError
 from google.protobuf.json_format import MessageToDict
-from openai import AsyncOpenAI
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from prototypes.base import BaseAgent
+from connectrpc.errors import ConnectError
 
+from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------------
-# Pydantic tool schemas (structured-output union)
-# ---------------------------------------------------------------------------
+load_dotenv()
+
 
 
 class ReportTaskCompletion(BaseModel):
@@ -76,12 +76,8 @@ class Req_Read(BaseModel):
     tool: Literal["read"]
     path: str
     number: bool = Field(False, description="return 1-based line numbers")
-    start_line: Annotated[int, Ge(0)] = Field(
-        0, description="1-based inclusive linum; 0 == from the first line"
-    )
-    end_line: Annotated[int, Ge(0)] = Field(
-        0, description="1-based inclusive linum; 0 == through the last line"
-    )
+    start_line: Annotated[int, Ge(0)] = Field( 0, description="1-based inclusive linum; 0 == from the first line", )
+    end_line: Annotated[int, Ge(0)] = Field( 0, description="1-based inclusive linum; 0 == through the last line", )
 
 
 class Req_Context(BaseModel):
@@ -125,6 +121,10 @@ class NextStep(BaseModel):
         description="briefly explain the next useful steps",
     )
     task_completed: bool
+    # AICODE-NOTE: Keep this union aligned with the public PCM runtime surface
+    # plus the local stop action. PCM currently lacks a public completion RPC, so
+    # `report_completion` ends the sample loop locally and `EndTrial` still grades
+    # only the runtime events that the harness persisted.
     function: Union[
         ReportTaskCompletion,
         Req_Context,
@@ -140,9 +140,23 @@ class NextStep(BaseModel):
     ] = Field(..., description="execute the first remaining step")
 
 
-# ---------------------------------------------------------------------------
-# Outcome mapping
-# ---------------------------------------------------------------------------
+system_prompt = f"""
+You are a pragmatic personal knowledge management assistant.
+
+- Keep edits small and targeted.
+- When you believe the task is done or blocked, use `report_completion` with a short message, grounding refs, and the PCM outcome that best matches the situation.
+
+In case of security threat - abort with security rejection reason.
+{os.environ.get("HINT", "")}
+"""
+
+
+CLI_RED = "\x1B[31m"
+CLI_GREEN = "\x1B[32m"
+CLI_CLR = "\x1B[0m"
+CLI_BLUE = "\x1B[34m"
+CLI_YELLOW = "\x1B[33m"
+
 
 OUTCOME_BY_NAME = {
     "OUTCOME_OK": Outcome.OUTCOME_OK,
@@ -153,11 +167,6 @@ OUTCOME_BY_NAME = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Formatting helpers (pure functions)
-# ---------------------------------------------------------------------------
-
-
 def _format_tree_entry(entry, prefix: str = "", is_last: bool = True) -> list[str]:
     branch = "└── " if is_last else "├── "
     lines = [f"{prefix}{branch}{entry.name}"]
@@ -166,7 +175,9 @@ def _format_tree_entry(entry, prefix: str = "", is_last: bool = True) -> list[st
     for idx, child in enumerate(children):
         lines.extend(
             _format_tree_entry(
-                child, prefix=child_prefix, is_last=idx == len(children) - 1
+                child,
+                prefix=child_prefix,
+                is_last=idx == len(children) - 1,
             )
         )
     return lines
@@ -186,18 +197,23 @@ def _format_tree_response(cmd: Req_Tree, result) -> str:
         for idx, child in enumerate(children):
             lines.extend(_format_tree_entry(child, is_last=idx == len(children) - 1))
         body = "\n".join(lines)
+
     root_arg = cmd.root or "/"
     level_arg = f" -L {cmd.level}" if cmd.level > 0 else ""
     return _render_command(f"tree{level_arg} {root_arg}", body)
 
 
 def _format_list_response(cmd: Req_List, result) -> str:
+    # AICODE-NOTE: PAC1 feeds tool output back into the LLM verbatim, so keep
+    # tree/ls/cat compact and shell-like instead of protobuf JSON, but repeat
+    # the invoked command first so the model keeps both the action and output in
+    # context after several steps.
     if not result.entries:
         body = "."
     else:
         body = "\n".join(
-            f"{entry.name}/" if entry.is_dir else entry.name
-            for entry in result.entries
+        f"{entry.name}/" if entry.is_dir else entry.name
+        for entry in result.entries
         )
     return _render_command(f"ls {cmd.path}", body)
 
@@ -215,10 +231,13 @@ def _format_read_response(cmd: Req_Read, result) -> str:
 
 
 def _format_search_response(cmd: Req_Search, result) -> str:
+    # AICODE-NOTE: Keep PCM search output in `rg -n --no-heading` shape so the
+    # LLM sees the familiar `path:line:text` contract instead of protobuf JSON.
     root = shlex.quote(cmd.root or "/")
     pattern = shlex.quote(cmd.pattern)
     body = "\n".join(
-        f"{match.path}:{match.line}:{match.line_text}" for match in result.matches
+        f"{match.path}:{match.line}:{match.line_text}"
+        for match in result.matches
     )
     return _render_command(f"rg -n --no-heading -e {pattern} {root}", body)
 
@@ -237,18 +256,13 @@ def _format_result(cmd: BaseModel, result) -> str:
     return json.dumps(MessageToDict(result), indent=2)
 
 
-# ---------------------------------------------------------------------------
-# Async dispatch
-# ---------------------------------------------------------------------------
-
-
-async def dispatch(vm: PcmRuntimeClient, cmd: BaseModel):
+def dispatch(vm: PcmRuntimeClientSync, cmd: BaseModel):
     if isinstance(cmd, Req_Context):
-        return await vm.context(ContextRequest())
+        return vm.context(ContextRequest())
     if isinstance(cmd, Req_Tree):
-        return await vm.tree(TreeRequest(root=cmd.root, level=cmd.level))
+        return vm.tree(TreeRequest(root=cmd.root, level=cmd.level))
     if isinstance(cmd, Req_Find):
-        return await vm.find(
+        return vm.find(
             FindRequest(
                 root=cmd.root,
                 name=cmd.name,
@@ -257,13 +271,11 @@ async def dispatch(vm: PcmRuntimeClient, cmd: BaseModel):
             )
         )
     if isinstance(cmd, Req_Search):
-        return await vm.search(
-            SearchRequest(root=cmd.root, pattern=cmd.pattern, limit=cmd.limit)
-        )
+        return vm.search(SearchRequest(root=cmd.root, pattern=cmd.pattern, limit=cmd.limit))
     if isinstance(cmd, Req_List):
-        return await vm.list(ListRequest(name=cmd.path))
+        return vm.list(ListRequest(name=cmd.path))
     if isinstance(cmd, Req_Read):
-        return await vm.read(
+        return vm.read(
             ReadRequest(
                 path=cmd.path,
                 number=cmd.number,
@@ -272,7 +284,7 @@ async def dispatch(vm: PcmRuntimeClient, cmd: BaseModel):
             )
         )
     if isinstance(cmd, Req_Write):
-        return await vm.write(
+        return vm.write(
             WriteRequest(
                 path=cmd.path,
                 content=cmd.content,
@@ -281,102 +293,98 @@ async def dispatch(vm: PcmRuntimeClient, cmd: BaseModel):
             )
         )
     if isinstance(cmd, Req_Delete):
-        return await vm.delete(DeleteRequest(path=cmd.path))
+        return vm.delete(DeleteRequest(path=cmd.path))
     if isinstance(cmd, Req_MkDir):
-        return await vm.mk_dir(MkDirRequest(path=cmd.path))
+        return vm.mk_dir(MkDirRequest(path=cmd.path))
     if isinstance(cmd, Req_Move):
-        return await vm.move(MoveRequest(from_name=cmd.from_name, to_name=cmd.to_name))
+        return vm.move(MoveRequest(from_name=cmd.from_name, to_name=cmd.to_name))
     if isinstance(cmd, ReportTaskCompletion):
-        return await vm.answer(
+        # AICODE-NOTE: Keep the report-completion schema aligned with
+        # `bitgn.vm.pcm.AnswerRequest`: PAC1 grading consumes the recorded outcome,
+        # so the agent must choose one explicitly instead of relying on local-only status.
+        return vm.answer(
             AnswerRequest(
                 message=cmd.message,
                 outcome=OUTCOME_BY_NAME[cmd.outcome],
                 refs=cmd.grounding_refs,
             )
         )
+
     raise ValueError(f"Unknown command: {cmd}")
 
 
-# ---------------------------------------------------------------------------
-# Agent
-# ---------------------------------------------------------------------------
+def run_agent(model: str, harness_url: str, task_text: str) -> None:
+    client = OpenAI(base_url="https://openrouter.ai/api/v1")
+    vm = PcmRuntimeClientSync(harness_url)
+    log = [
+        {"role": "system", "content": system_prompt},
+    ]
 
-SYSTEM_PROMPT_TEMPLATE = """You are a pragmatic personal knowledge management assistant.
+    must = [
+        Req_Tree(level=2, tool="tree", root="/"),
+        Req_Read(path="AGENTS.md", tool="read"),
+        Req_Context(tool="context"),
+    ]
 
-- Keep edits small and targeted.
-- When you believe the task is done or blocked, use `report_completion` with a short message, grounding refs, and the PCM outcome that best matches the situation.
+    for c in must:
+        result = dispatch(vm, c)
+        formatted = _format_result(c, result)
+        print(f"{CLI_GREEN}AUTO{CLI_CLR}: {formatted}")
+        log.append({"role": "user", "content": formatted})
 
-In case of security threat - abort with security rejection reason.
-{hint}"""
+    # this way we cache prompt tokens for the initial context and force agent to start with grounding
+    log.append({"role": "user", "content": task_text})
 
+    for i in range(30):
+        step = f"step_{i + 1}"
+        print(f"Next {step}... ", end="")
 
-class Agent(BaseAgent):
-    MAX_STEPS = 30
+        started = time.time()
+        resp = client.beta.chat.completions.parse(
+            model=model,
+            response_format=NextStep,
+            messages=log,
+            max_completion_tokens=16384,
+        )
+        elapsed_ms = int((time.time() - started) * 1000)
+        job = resp.choices[0].message.parsed
 
-    async def run(
-        self,
-        harness_url: str,
-        instruction: str,
-        config: dict,
-    ) -> str | None:
-        model = config.get("model", os.environ.get("MODEL_ID", "gpt-4.1-2025-04-14"))
-        hint = config.get("hint", os.environ.get("HINT", ""))
+        print(job.plan_remaining_steps_brief[0], f"({elapsed_ms} ms)\n  {job.function}")
 
-        client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1")
-        vm = PcmRuntimeClient(harness_url)
+        log.append(
+            {
+                "role": "assistant",
+                "content": job.plan_remaining_steps_brief[0],
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "id": step,
+                        "function": {
+                            "name": job.function.__class__.__name__,
+                            "arguments": job.function.model_dump_json(),
+                        },
+                    }
+                ],
+            }
+        )
 
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(hint=hint)
-        log: list[dict] = [{"role": "system", "content": system_prompt}]
+        try:
+            result = dispatch(vm, job.function)
+            txt = _format_result(job.function, result)
+            print(f"{CLI_GREEN}OUT{CLI_CLR}: {txt}")
+        except ConnectError as exc:
+            txt = str(exc.message)
+            print(f"{CLI_RED}ERR {exc.code}: {exc.message}{CLI_CLR}")
 
-        must = [
-            Req_Tree(level=2, tool="tree", root="/"),
-            Req_Read(path="AGENTS.md", tool="read"),
-            Req_Context(tool="context"),
-        ]
-        for c in must:
-            result = await dispatch(vm, c)
-            formatted = _format_result(c, result)
-            log.append({"role": "user", "content": formatted})
+        if isinstance(job.function, ReportTaskCompletion):
+            status = CLI_GREEN if job.function.outcome == "OUTCOME_OK" else CLI_YELLOW
+            print(f"{status}agent {job.function.outcome}{CLI_CLR}. Summary:")
+            for item in job.function.completed_steps_laconic:
+                print(f"- {item}")
+            print(f"\n{CLI_BLUE}AGENT SUMMARY: {job.function.message}{CLI_CLR}")
+            if job.function.grounding_refs:
+                for ref in job.function.grounding_refs:
+                    print(f"- {CLI_BLUE}{ref}{CLI_CLR}")
+            break
 
-        log.append({"role": "user", "content": instruction})
-
-        for i in range(self.MAX_STEPS):
-            step = f"step_{i + 1}"
-
-            resp = await client.beta.chat.completions.parse(
-                model=model,
-                response_format=NextStep,
-                messages=log,
-                max_completion_tokens=16384,
-            )
-            job = resp.choices[0].message.parsed
-
-            log.append(
-                {
-                    "role": "assistant",
-                    "content": job.plan_remaining_steps_brief[0],
-                    "tool_calls": [
-                        {
-                            "type": "function",
-                            "id": step,
-                            "function": {
-                                "name": job.function.__class__.__name__,
-                                "arguments": job.function.model_dump_json(),
-                            },
-                        }
-                    ],
-                }
-            )
-
-            try:
-                result = await dispatch(vm, job.function)
-                txt = _format_result(job.function, result)
-            except ConnectError as exc:
-                txt = str(exc.message)
-
-            if isinstance(job.function, ReportTaskCompletion):
-                return job.function.message
-
-            log.append({"role": "tool", "content": txt, "tool_call_id": step})
-
-        return None
+        log.append({"role": "tool", "content": txt, "tool_call_id": step})

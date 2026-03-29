@@ -1,10 +1,10 @@
 import asyncio
 import os
 import textwrap
+import uuid
 from dataclasses import dataclass
 
-from langfuse import get_client
-from langfuse.langchain import CallbackHandler
+from langsmith import Client as LangSmithClient
 
 from bitgn.harness_connect import HarnessServiceClient
 from bitgn.harness_pb2 import (
@@ -14,13 +14,23 @@ from bitgn.harness_pb2 import (
     StartPlaygroundRequest,
     StatusRequest,
 )
+
 from prototypes import load_prototype
+from eval.run_logger import (
+    generate_run_id,
+    create_run_dir,
+    format_task_log,
+    format_error_log,
+    write_task_log,
+    write_run_summary,
+)
 
-CLI_RED = "\x1b[31m"
-CLI_GREEN = "\x1b[32m"
-CLI_CLR = "\x1b[0m"
 
-BITGN_URL = os.getenv("BENCHMARK_HOST") or "https://api.bitgn.com"
+CLI_RED = "\x1B[31m"
+CLI_GREEN = "\x1B[32m"
+CLI_CLR = "\x1B[0m"
+CLI_BLUE = "\x1B[34m"
+CLI_YELLOW = "\x1B[33m"
 
 
 @dataclass
@@ -28,12 +38,11 @@ class TaskResult:
     task_id: str
     score: float
     details: str
+    run_id: str | None = None
 
 
 @dataclass
 class EvalResult:
-    prototype: str
-    benchmark: str
     results: list[TaskResult]
 
     @property
@@ -48,111 +57,116 @@ async def run_eval(config: dict) -> EvalResult:
     prototype_name = config["prototype"]
     benchmark_id = config["benchmark"]
     concurrency = config.get("concurrency", 1)
-    task_filter = config.get("task_ids", [])
+    task_filter = set(config.get("task_ids", []))
 
+    agent_config = {
+        "model": config.get("model", os.environ.get("MODEL_ID", "gpt-4.1-2025-04-14")),
+        "thread_id": str(uuid.uuid4()),
+    }
+
+    run_id = generate_run_id()
+    run_dir = create_run_dir(run_id)
+    print(f"Run logs: {run_dir}")
+
+    ls_client = LangSmithClient()
     AgentClass = load_prototype(prototype_name)
 
-    client = HarnessServiceClient(BITGN_URL)
-    print("Connecting to BitGN", await client.status(StatusRequest()))
+    bitgn_url = os.environ.get("BENCHMARK_HOST", "https://api.bitgn.com")
+    harness = HarnessServiceClient(bitgn_url)
 
-    res = await client.get_benchmark(GetBenchmarkRequest(benchmark_id=benchmark_id))
+    status = await harness.status(StatusRequest())
+    print(f"Connected to BitGN {status}")
+
+    bench = await harness.get_benchmark(
+        GetBenchmarkRequest(benchmark_id=benchmark_id)
+    )
     print(
-        f"{EvalPolicy.Name(res.policy)} benchmark: {res.benchmark_id} "
-        f"with {len(res.tasks)} tasks.\n{CLI_GREEN}{res.description}{CLI_CLR}"
+        f"{EvalPolicy.Name(bench.policy)} benchmark: {bench.benchmark_id} "
+        f"with {len(bench.tasks)} tasks.\n{CLI_GREEN}{bench.description}{CLI_CLR}"
     )
 
-    tasks = res.tasks
-    if task_filter:
-        tasks = [t for t in tasks if t.task_id in task_filter]
-
-    try:
-        langfuse = get_client()
-        session_id = langfuse.create_trace_id()
-    except Exception:
-        langfuse = None
-        session_id = None
+    tasks = [t for t in bench.tasks if not task_filter or t.task_id in task_filter]
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def run_task(t) -> TaskResult:
+    async def run_task(task) -> TaskResult:
         async with sem:
-            print("=" * 40)
-            print(f"Starting Task: {t.task_id}")
+            print(f"{'=' * 30} Starting task: {task.task_id} {'=' * 30}")
 
-            trial = await client.start_playground(
+            trial = await harness.start_playground(
                 StartPlaygroundRequest(
                     benchmark_id=benchmark_id,
-                    task_id=t.task_id,
+                    task_id=task.task_id,
                 )
             )
-            print("Task:", trial.instruction)
+            print(f"{CLI_BLUE}{trial.instruction}{CLI_CLR}\n{'-' * 80}")
 
-            langfuse_handler = CallbackHandler() if langfuse else None
-            invoke_config = {}
-            if langfuse_handler:
-                invoke_config = {
-                    "callbacks": [langfuse_handler],
-                    "metadata": {
-                        "langfuse_session_id": session_id,
-                        "langfuse_tags": ["bitgn", "agent"],
-                    },
-                    "run_name": f"task-{t.task_id}",
-                }
+            task_config = {**agent_config, "run_name": task.task_id}
 
+            agent = AgentClass()
             try:
-                agent = AgentClass()
-                await agent.run(
-                    trial.harness_url,
-                    trial.instruction,
-                    config=invoke_config,
-                )
-            except Exception as e:
-                print(f"{CLI_RED}Agent error: {e}{CLI_CLR}")
+                await agent.run(trial.harness_url, trial.instruction, task_config)
+            except Exception as exc:
+                print(f"{CLI_RED}Agent error: {exc}{CLI_CLR}")
 
-            result = await client.end_trial(
+            result = await harness.end_trial(
                 EndTrialRequest(trial_id=trial.trial_id)
             )
 
-            if langfuse_handler and langfuse_handler.last_trace_id:
-                langfuse.create_score(
-                    trace_id=langfuse_handler.last_trace_id,
-                    name="task_score",
-                    value=result.score,
-                    data_type="NUMERIC",
-                )
-
             score = result.score if result.score >= 0 else 0.0
             details = "\n".join(result.score_detail)
-
             style = CLI_GREEN if result.score == 1 else CLI_RED
-            explain = textwrap.indent(details, "  ")
-            print(f"\n{style}Score: {result.score:0.2f}\n{explain}\n{CLI_CLR}")
-
-            return TaskResult(
-                task_id=t.task_id,
-                score=score,
-                details=details,
+            print(
+                f"\n{style}Score: {result.score:0.2f}\n"
+                f"{textwrap.indent(details, '  ')}\n{CLI_CLR}"
             )
 
-    coros = [run_task(t) for t in tasks]
-    results = await asyncio.gather(*coros, return_exceptions=True)
+            # Write task log
+            messages = getattr(agent, "last_messages", None)
+            if messages:
+                log_content = format_task_log(
+                    task_id=task.task_id,
+                    instruction=trial.instruction,
+                    messages=messages,
+                    score=score,
+                    score_details=details,
+                )
+            else:
+                log_content = format_error_log(
+                    task_id=task.task_id,
+                    instruction=trial.instruction,
+                    error="No messages captured (agent may have failed before execution)",
+                    score=score,
+                    score_details=details,
+                )
+            write_task_log(run_dir, task.task_id, log_content)
 
-    # Convert exceptions to failed TaskResults
-    final_results = []
-    for i, r in enumerate(results):
-        if isinstance(r, Exception):
-            print(f"{CLI_RED}Task failed with exception: {r}{CLI_CLR}")
-            final_results.append(
-                TaskResult(task_id=tasks[i].task_id, score=0.0, details=str(r))
-            )
-        else:
-            final_results.append(r)
+            run_id = getattr(agent, "last_run_id", None)
+            if run_id:
+                try:
+                    ls_client.create_feedback(
+                        run_id=run_id,
+                        key="score",
+                        score=score,
+                        comment=details,
+                    )
+                except Exception as exc:
+                    print(f"{CLI_YELLOW}LangSmith feedback error: {exc}{CLI_CLR}")
 
-    if langfuse:
-        langfuse.flush()
+            return TaskResult(task.task_id, score, details, run_id=run_id)
 
-    return EvalResult(
-        prototype=prototype_name,
-        benchmark=benchmark_id,
-        results=final_results,
+    raw_results = await asyncio.gather(
+        *[run_task(t) for t in tasks], return_exceptions=True
     )
+
+    task_results: list[TaskResult] = []
+    for i, r in enumerate(raw_results):
+        if isinstance(r, BaseException):
+            print(f"{CLI_RED}Task {tasks[i].task_id} failed: {r}{CLI_CLR}")
+            task_results.append(TaskResult(tasks[i].task_id, 0.0, str(r)))
+        else:
+            task_results.append(r)
+
+    write_run_summary(run_dir, task_results, config)
+
+    return EvalResult(results=task_results)
