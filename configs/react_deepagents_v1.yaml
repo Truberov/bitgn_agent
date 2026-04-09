@@ -1,0 +1,5 @@
+prototype: react_deepagents_v1
+model: qwen/qwen3.5-397b-a17b
+benchmark: bitgn/pac1-dev
+concurrency: 4
+# task_ids: [t03]
