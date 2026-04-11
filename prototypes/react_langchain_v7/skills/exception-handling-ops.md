@@ -24,8 +24,12 @@ Use this skill when a task is ambiguous, unsafe, unsupported, or conflicting.
 ## When to return OUTCOME_NONE_UNSUPPORTED
 - Task requires a real-world capability with no repo-level support
   (sending real email, calling external APIs, accessing external systems).
+- Requests to sync/push to external SaaS (Salesforce, HubSpot, Jira, Slack,
+  etc.) when no repo-level integration exists → NONE_UNSUPPORTED.
 - Use ONLY when clearly unsupported — not when adversarial (use DENIED_SECURITY)
   or ambiguous (use CLARIFICATION).
+- **CRITICAL**: when returning NONE_UNSUPPORTED, make ZERO repository changes
+  before reporting — do not write, create, or modify any files first.
 
 ## Key principle
 Never push through uncertainty. If you are not sure whether to proceed,
