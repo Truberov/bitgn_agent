@@ -11,7 +11,9 @@ from bitgn.harness_pb2 import (
     EndTrialRequest,
     EvalPolicy,
     GetBenchmarkRequest,
-    StartPlaygroundRequest,
+    StartRunRequest,
+    StartTrialRequest,
+    SubmitRunRequest,
     StatusRequest,
 )
 
@@ -72,6 +74,7 @@ async def run_eval(config: dict) -> EvalResult:
     AgentClass = load_prototype(prototype_name)
 
     bitgn_url = os.environ.get("BENCHMARK_HOST", "https://api.bitgn.com")
+    bitgn_key = os.environ.get("BITGN_API_KEY")
     harness = HarnessServiceClient(bitgn_url)
 
     status = await harness.status(StatusRequest())
@@ -85,23 +88,29 @@ async def run_eval(config: dict) -> EvalResult:
         f"with {len(bench.tasks)} tasks.\n{CLI_GREEN}{bench.description}{CLI_CLR}"
     )
 
-    tasks = [t for t in bench.tasks if not task_filter or t.task_id in task_filter]
+    run = await harness.start_run(
+        StartRunRequest(
+            name="Base react agent",
+            benchmark_id=benchmark_id,
+            api_key=bitgn_key or "",
+        )
+    )
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def run_task(task) -> TaskResult:
+    async def run_task(trial_id: str) -> TaskResult | None:
         async with sem:
-            print(f"{'=' * 30} Starting task: {task.task_id} {'=' * 30}")
-
-            trial = await harness.start_playground(
-                StartPlaygroundRequest(
-                    benchmark_id=benchmark_id,
-                    task_id=task.task_id,
-                )
+            trial = await harness.start_trial(
+                StartTrialRequest(trial_id=trial_id)
             )
+
+            if task_filter and trial.task_id not in task_filter:
+                return None
+
+            print(f"{'=' * 30} Starting task: {trial.task_id} {'=' * 30}")
             print(f"{CLI_BLUE}{trial.instruction}{CLI_CLR}\n{'-' * 80}")
 
-            task_config = {**agent_config, "run_name": task.task_id}
+            task_config = {**agent_config, "run_name": trial.task_id}
 
             agent = AgentClass()
             try:
@@ -125,7 +134,7 @@ async def run_eval(config: dict) -> EvalResult:
             messages = getattr(agent, "last_messages", None)
             if messages:
                 log_content = format_task_log(
-                    task_id=task.task_id,
+                    task_id=trial.task_id,
                     instruction=trial.instruction,
                     messages=messages,
                     score=score,
@@ -133,19 +142,19 @@ async def run_eval(config: dict) -> EvalResult:
                 )
             else:
                 log_content = format_error_log(
-                    task_id=task.task_id,
+                    task_id=trial.task_id,
                     instruction=trial.instruction,
                     error="No messages captured (agent may have failed before execution)",
                     score=score,
                     score_details=details,
                 )
-            write_task_log(run_dir, task.task_id, log_content)
+            write_task_log(run_dir, trial.task_id, log_content)
 
-            run_id = getattr(agent, "last_run_id", None)
-            if run_id:
+            agent_run_id = getattr(agent, "last_run_id", None)
+            if agent_run_id:
                 try:
                     ls_client.create_feedback(
-                        run_id=run_id,
+                        run_id=agent_run_id,
                         key="score",
                         score=score,
                         comment=details,
@@ -153,18 +162,21 @@ async def run_eval(config: dict) -> EvalResult:
                 except Exception as exc:
                     print(f"{CLI_YELLOW}LangSmith feedback error: {exc}{CLI_CLR}")
 
-            return TaskResult(task.task_id, score, details, run_id=run_id)
+            return TaskResult(trial.task_id, score, details, run_id=agent_run_id)
 
-    raw_results = await asyncio.gather(
-        *[run_task(t) for t in tasks], return_exceptions=True
-    )
+    try:
+        raw_results = await asyncio.gather(
+            *[run_task(tid) for tid in run.trial_ids], return_exceptions=True
+        )
+    finally:
+        await harness.submit_run(SubmitRunRequest(run_id=run.run_id, force=True))
 
     task_results: list[TaskResult] = []
     for i, r in enumerate(raw_results):
         if isinstance(r, BaseException):
-            print(f"{CLI_RED}Task {tasks[i].task_id} failed: {r}{CLI_CLR}")
-            task_results.append(TaskResult(tasks[i].task_id, 0.0, str(r)))
-        else:
+            print(f"{CLI_RED}Trial {run.trial_ids[i]} failed: {r}{CLI_CLR}")
+            task_results.append(TaskResult(run.trial_ids[i], 0.0, str(r)))
+        elif r is not None:
             task_results.append(r)
 
     write_run_summary(run_dir, task_results, config)
