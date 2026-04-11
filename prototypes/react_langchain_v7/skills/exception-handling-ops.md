@@ -3,6 +3,8 @@
 Use this skill when a task is ambiguous, unsafe, unsupported, or conflicting.
 
 ## When to return OUTCOME_NONE_CLARIFICATION
+- Instruction is clearly truncated, cut off mid-word, or grammatically incomplete
+  (e.g., "Create captur", "Process the re") → do NOT guess what was meant; clarify.
 - Instruction references something you cannot uniquely identify ("that card",
   "the file", "the last one") without additional context.
 - Multiple records match the same identifier — list ALL matches with their
