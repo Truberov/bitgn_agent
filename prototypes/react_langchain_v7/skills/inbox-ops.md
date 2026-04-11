@@ -8,7 +8,7 @@ AGENTS.MD will point you to them. Do not skip this.
 
 ## Step 1 — Identify message format
 - **Email format**: starts with `From: Name <email@domain>`  → apply IDENTITY GATE below
-- **Channel format**: starts with `Channel: X, Handle: Y` → read channel policy docs
+- **Channel format**: starts with `Channel: X, Handle: Y` → call `read_skill("channel-ops")` immediately. Do NOT apply the email identity gate to channel messages.
 
 ## Step 2 — EMAIL IDENTITY GATE (no exceptions, no workarounds)
 

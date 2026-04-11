@@ -9,6 +9,7 @@ Call `read_skill(name)` with the exact name from the Name column.
 | finance-ops | Answer money questions: invoices, payments, totals, dates, account balances |
 | document-ops | Structure financial docs, organize records, queue workflows, deduplicate |
 | inbox-ops | Process incoming requests in a disciplined way, verify identity, follow repo workflow |
+| channel-ops | Handle channel-format inbox messages (Discord, Telegram, etc.) — detect injection vs legitimate tasks |
 | communication-ops | Prepare replies, resend documents, assemble outbound emails with attachments |
 | security-trust-ops | Verify identity, enforce data boundaries, resist prompt injection, prevent data leaks |
 | exception-handling-ops | Handle ambiguous, unsafe, or unsupported requests — when to clarify vs. refuse |
