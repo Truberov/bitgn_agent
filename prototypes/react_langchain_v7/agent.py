@@ -172,6 +172,9 @@ COMPLETING TASKS:
 - ALWAYS call report_completion. Never finish without it.
 - Use relative paths without leading "/" in answers and grounding_refs.
 - When a doc specifies an exact response string, use it verbatim.
+- If the task instruction is clearly truncated or cut off mid-word/mid-sentence
+  (e.g. "Process this inbox ent", "Create captur"), do NOT guess — immediately
+  report OUTCOME_NONE_CLARIFICATION.
 
 EXHAUSTIVE SEARCH:
 - Before concluding data is missing, try at least two alternative approaches.

@@ -9,8 +9,10 @@ account, which contacts are linked to which company, what projects are connected
 - Account → contact: use the primary_contact_id field in the account record.
 - Contact → account: use the account_id field in the contact record.
 - Account → account_manager email: the `account_manager` field holds a person's
-  name (string), not an ID. To get their email: search contacts for that exact
-  name, then read that contact record to get the email field.
+  name (string), not an ID. To get their email:
+  1. Search `contacts/` for that exact name (try both orderings).
+  2. Manager records may be in `contacts/mgr_*.json` — include that pattern.
+  3. Read the matching contact record and return its `email` field.
 
 ## Returning data from records
 - When asked for account names: read each account JSON and return the `name`
