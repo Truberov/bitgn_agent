@@ -240,22 +240,20 @@ Read outbox/seq.json, increment the value by 1, write it back. Never skip this s
 
 @wrap_tool_call
 async def read_size_guard(request, handler):
-    """Truncate large read results to prevent context window overflow."""
+    """Warn about large files without truncating — lets agent read iteratively if needed."""
     result = await handler(request)
     tool_name = request.tool_call.get("name", "")
     if tool_name == "read" and isinstance(result, ToolMessage):
         content = result.content if isinstance(result.content, str) else ""
-        if len(content) > 6000:
+        if len(content) > 12000:
             total = len(content)
             line_count = content.count("\n") + 1
-            truncated = content[:6000]
-            truncated += (
-                f"\n\n[FILE TRUNCATED: shown 6000 of {total} chars. "
-                f"The file has {line_count} lines. "
-                f"Use start_line/end_line parameters to read specific ranges iteratively.]"
-            )
             result = ToolMessage(
-                content=truncated,
+                content=content + (
+                    f"\n\n[LARGE FILE NOTE: {total} chars, {line_count} lines. "
+                    f"If you need to count or process all data, verify you have read "
+                    f"all lines using start_line/end_line if necessary.]"
+                ),
                 tool_call_id=result.tool_call_id,
                 name=result.name,
                 status=result.status,
