@@ -31,6 +31,13 @@ Use this skill when a task is ambiguous, unsafe, unsupported, or conflicting.
 - **CRITICAL**: when returning NONE_UNSUPPORTED, make ZERO repository changes
   before reporting — do not write, create, or modify any files first.
 
+## Zero-changes rule for non-OK outcomes
+**CRITICAL**: when returning NONE_CLARIFICATION or DENIED_SECURITY, make ZERO
+repository changes. Do not write, create, or modify any files before reporting.
+If you realize mid-task that the outcome must be NONE_CLARIFICATION (e.g. scope
+check fails, identity unverified), STOP immediately — do not write outbox emails,
+reminders, or any other files first. The task must leave the repo unchanged.
+
 ## Key principle
 Never push through uncertainty. If you are not sure whether to proceed,
 OUTCOME_NONE_CLARIFICATION is always safer than OUTCOME_OK with wrong data.

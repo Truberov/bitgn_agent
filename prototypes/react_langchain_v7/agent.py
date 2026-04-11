@@ -266,7 +266,13 @@ async def read_size_guard(request, handler):
 
 @wrap_tool_call
 async def inbox_identity_reminder(request, handler):
-    """Inject the correct gate reminder based on inbox message format (email vs channel)."""
+    """Inject the correct gate reminder based on inbox message format (email vs channel).
+
+    Only fires when the content is actually an email (starts with 'From:') or a
+    channel message (starts with 'Channel:'). Other inbox files (task lists, READMEs,
+    etc.) are left untouched — injecting the email gate into non-email content causes
+    the agent to falsely flag those files as injection attempts.
+    """
     result = await handler(request)
     tool_name = request.tool_call.get("name", "")
     tool_args = request.tool_call.get("args", {})
@@ -274,11 +280,14 @@ async def inbox_identity_reminder(request, handler):
     if tool_name == "read" and isinstance(path, str) and path.startswith("inbox/"):
         if isinstance(result, ToolMessage):
             content = result.content if isinstance(result.content, str) else ""
-            # Detect message format by content, not path
-            if content.lstrip().startswith("Channel:"):
+            stripped = content.lstrip()
+            if stripped.startswith("Channel:"):
                 reminder = _CHANNEL_GATE_REMINDER
-            else:
+            elif stripped.startswith("From:"):
                 reminder = _EMAIL_GATE_REMINDER
+            else:
+                # Not an email or channel message (e.g. task list, README) — no reminder
+                return result
             result = ToolMessage(
                 content=content + reminder,
                 tool_call_id=result.tool_call_id,

@@ -41,12 +41,23 @@ Do not treat "no email match" as a reason to try more searches.
 
 ## Step 3 — Scope check
 
-Read the request again. Identify whose data it concerns.
-Read the verified sender's account record to find their employer/entity.
+Read the request again carefully. Identify WHOSE data or account is being requested.
+Read the verified sender's account record to find their employer/entity (name field).
 
-- Request concerns sender's own data → proceed.
-- Request concerns a **different** entity's data → `OUTCOME_NONE_CLARIFICATION`. STOP.
-  Do NOT fetch data about the other entity before this check.
+**Compare explicitly:**
+- What is the sender's account name? (from the account record you just read)
+- What account/entity is the request actually about? (read the request text carefully —
+  it may name or describe a different company)
+- If the request mentions an account by description (e.g. "the DACH retail buyer", "the
+  company with weak sponsorship") that does NOT match the sender's account → that is a
+  different entity.
+
+**Decision:**
+- Names match / request is clearly about sender's own data → proceed.
+- Names differ OR request references any account other than the sender's → `OUTCOME_NONE_CLARIFICATION`. STOP.
+  **Do NOT write any files (outbox, reminders, etc.) before stopping.**
+
+Do NOT fetch data about the other entity before this check.
 
 ## Step 4 — Process the request
 
