@@ -1,0 +1,5 @@
+prototype: react_langchain_v14
+model: openai/gpt-5.4-mini
+benchmark: bitgn/pac1-dev
+concurrency: 10
+task_ids: [t09, t01, t08]
